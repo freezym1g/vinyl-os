@@ -29,17 +29,17 @@ enum SpotifyFailure: LocalizedError {
 struct AlbumDTO: Decodable {
     let id: String
     let name: String
-    let artists: [ArtistDTO]
-    let release_date: String
-    let images: [ImageDTO]
+    let artists: [ArtistDTO]?
+    let release_date: String?
+    let images: [ImageDTO]?
     let external_urls: ExternalURLs?
 
     func asVinylAlbum() -> VinylAlbum {
         VinylAlbum(id: id,
                    name: name,
-                   artist: artists.map(\.name).joined(separator: ", "),
-                   year: String(release_date.prefix(4)),
-                   artURL: images.first?.url ?? "",
+                   artist: (artists ?? []).map(\.name).joined(separator: ", "),
+                   year: String((release_date ?? "—").prefix(4)),
+                   artURL: images?.first?.url ?? "",
                    spotifyURL: external_urls?.spotify ?? "https://open.spotify.com/album/\(id)")
     }
 }
@@ -47,14 +47,14 @@ struct ArtistDTO: Decodable { let name: String }
 struct ImageDTO: Decodable { let url: String }
 struct ExternalURLs: Decodable { let spotify: String? }
 struct SavedAlbumsDTO: Decodable {
-    struct Item: Decodable { let album: AlbumDTO }
+    struct Item: Decodable { let album: AlbumDTO? }
     let items: [Item]
     let next: String?
 }
 struct RecentTracksDTO: Decodable {
     struct Item: Decodable {
-        struct Track: Decodable { let album: AlbumDTO }
-        let track: Track
+        struct Track: Decodable { let album: AlbumDTO? }
+        let track: Track?
     }
     let items: [Item]
 }
@@ -184,7 +184,12 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw SpotifyFailure.badResponse("Spotify API (\(status)): \(Self.errorText(data))")
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(350), encoding: .utf8) ?? "(не текстовый ответ)"
+            throw SpotifyFailure.badResponse("Spotify вернул неожиданные данные: \(error.localizedDescription). Ответ: \(preview)")
+        }
     }
 
     func savedAlbums() async throws -> [VinylAlbum] {
@@ -193,7 +198,7 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
         var pages = 0
         while let link = next, let url = URL(string: link), pages < 20 {
             let response: SavedAlbumsDTO = try await get(url)
-            results += response.items.map { $0.album.asVinylAlbum() }
+            results += response.items.compactMap { $0.album?.asVinylAlbum() }
             next = response.next
             pages += 1
         }
@@ -204,7 +209,7 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
         let response: RecentTracksDTO = try await get(URL(string: "https://api.spotify.com/v1/me/player/recently-played?limit=50")!)
         var seen = Set<String>()
         return response.items.compactMap { item in
-            let album = item.track.album.asVinylAlbum()
+            guard let album = item.track?.album?.asVinylAlbum() else { return nil }
             return seen.insert(album.id).inserted ? album : nil
         }
     }
