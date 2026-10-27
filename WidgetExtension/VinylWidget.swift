@@ -163,6 +163,21 @@ struct VinylProvider: AppIntentTimelineProvider {
     }
 }
 
+/// Widget links launch the containing app. Use an explicit VINYL callback
+/// instead of passing an external Spotify URL to WidgetKit and losing it.
+private enum SpotifyWidgetAction {
+    static func link(for album: VinylAlbum) -> URL? {
+        guard let spotify = album.link,
+              spotify.scheme?.lowercased() == "https",
+              spotify.host?.lowercased() == "open.spotify.com" else { return nil }
+        var url = URLComponents()
+        url.scheme = "vinyl-of-day"
+        url.host = "open-spotify"
+        url.queryItems = [URLQueryItem(name: "url", value: spotify.absoluteString)]
+        return url.url
+    }
+}
+
 struct VinylWidgetView: View {
     let entry: VinylEntry
     @Environment(\.widgetRenderingMode) private var renderingMode
@@ -212,12 +227,14 @@ struct VinylWidgetView: View {
                     .font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
                 Spacer(minLength: 0)
                 HStack(spacing: 4) {
-                    if let spotify = entry.album.link {
-                        Link(destination: spotify) {
+                    if let action = SpotifyWidgetAction.link(for: entry.album) {
+                        Link(destination: action) {
                             Label("OPEN IN SPOTIFY", systemImage: "play.fill")
                                 .font(.system(size: 10, weight: .semibold))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.7)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
                         }
                     }
                     Spacer(minLength: 0)
