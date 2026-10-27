@@ -175,10 +175,6 @@ struct TodayView: View {
                             .padding(.vertical, 40)
                     }
 
-                    Text("Для синхронизации с виджетом настрой GitHub Gist в «Настройки → Виджет».")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 17)
@@ -202,10 +198,6 @@ struct VinylFeatureCard: View {
             RemoteArtwork(url: album.artwork)
                 .frame(maxWidth: .infinity)
                 .shadow(color: .black.opacity(0.35), radius: 20, y: 12)
-            Text("TODAY’S RECORD")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .tracking(1.5)
-                .foregroundStyle(.white.opacity(0.65))
             Text(album.name)
                 .font(.system(size: 34, weight: .bold, design: .rounded))
                 .lineLimit(2).minimumScaleFactor(0.6)
@@ -352,14 +344,36 @@ struct AlbumActionsSheet: View {
                 VStack(spacing: 16) {
                     RemoteArtwork(url: album.artwork)
                         .frame(width: 185, height: 185)
-                    VStack(spacing: 5) {
-                        Text(album.name)
-                            .font(.title2.weight(.bold))
-                            .multilineTextAlignment(.center)
-                        Text(album.artist).foregroundStyle(.secondary)
-                        Text(album.year).font(.caption).foregroundStyle(.secondary)
+                    // Show a compact score on the right only for rated albums.
+                    // Unrated albums keep the original centered title treatment.
+                    if let score = model.ratings[album.id], (1...10).contains(score) {
+                        HStack(alignment: .top, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(album.name).font(.title2.weight(.bold))
+                                    .multilineTextAlignment(.leading)
+                                Text(album.artist).foregroundStyle(.secondary)
+                                Text(album.year).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            Text("\(score)/10")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 9)
+                                .vinylGlassSurface(cornerRadius: 16)
+                                .accessibilityLabel("Моя оценка: \(score) из 10")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 5)
+                    } else {
+                        VStack(spacing: 5) {
+                            Text(album.name).font(.title2.weight(.bold))
+                                .multilineTextAlignment(.center)
+                            Text(album.artist).foregroundStyle(.secondary)
+                            Text(album.year).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(.bottom, 5)
                     }
-                    .padding(.bottom, 5)
 
                     Button {
                         Task {
