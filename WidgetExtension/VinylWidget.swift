@@ -165,12 +165,27 @@ struct VinylProvider: AppIntentTimelineProvider {
 
 struct VinylWidgetView: View {
     let entry: VinylEntry
+    @Environment(\.widgetRenderingMode) private var renderingMode
+
+    @ViewBuilder
+    private func artworkView(_ image: UIImage) -> some View {
+        if #available(iOS 26.0, *) {
+            Image(uiImage: image)
+                .resizable()
+                .widgetAccentedRenderingMode(.fullColor)
+                .scaledToFill()
+        } else {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+        }
+    }
 
     var body: some View {
         HStack(spacing: 14) {
             Group {
                 if let data = entry.imageData, let image = UIImage(data: data) {
-                    Image(uiImage: image).resizable().scaledToFill()
+                    artworkView(image)
                 } else {
                     ZStack {
                         Color.white.opacity(0.1)
@@ -183,6 +198,7 @@ struct VinylWidgetView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("TODAY’S RECORD")
+                    .widgetAccentable()
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .tracking(0.7)
                     .foregroundStyle(.white.opacity(0.8))
@@ -230,7 +246,14 @@ struct VinylWidgetView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .containerBackground(entry.background.swiftUIColor, for: .widget)
+        .containerBackground(for: .widget) {
+            if renderingMode == .fullColor {
+                entry.background.swiftUIColor
+            } else {
+                // iOS 26 applies clear/tinted Liquid Glass itself.
+                Color.clear
+            }
+        }
     }
 }
 
