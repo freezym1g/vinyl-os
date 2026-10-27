@@ -66,7 +66,14 @@ final class VinylModel: ObservableObject {
             ratings[id] = review.score
         }
         mode = CollectionMode(rawValue: defaults.string(forKey: "vinyl.mode") ?? "") ?? .saved
-        selectedID = defaults.string(forKey: "vinyl.selected") ?? ""
+        // Migrate the old single selection into whichever source was active.
+        // Never overwrite a source-specific selection when upgrading.
+        let legacyID = defaults.string(forKey: "vinyl.selected") ?? ""
+        let initialKey = selectionKey(for: mode)
+        if defaults.string(forKey: initialKey) == nil && !legacyID.isEmpty {
+            defaults.set(legacyID, forKey: initialKey)
+        }
+        selectedID = defaults.string(forKey: initialKey) ?? ""
         selectDailyIfNeeded()
         Task { await updateAccent() }
     }
@@ -80,25 +87,65 @@ final class VinylModel: ObservableObject {
         defaults.set(data, forKey: key)
     }
 
-    func selectDailyIfNeeded() {
-        let date = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none)
-        let key = "vinyl.day.\(mode.rawValue)"
-        if defaults.string(forKey: key) != date || !pool.contains(where: { $0.id == selectedID }) {
-            if let pick = pool.randomElement() { select(pick) }
-            defaults.set(date, forKey: key)
+    // The two sources must remember their selections independently. The
+    // single `vinyl.selected` key is retained for older app data/compatibility.
+    private func selectionKey(for source: CollectionMode) -> String {
+        switch source {
+        case .saved: return "vinyl.selected.saved"
+        case .recent: return "vinyl.selected.recent"
         }
     }
 
+    private func dateKey(for source: CollectionMode) -> String {
+        "vinyl.day.\(source.rawValue)"
+    }
+
+    private func todayStamp() -> String {
+        // Stable calendar date, independent of user language or date-format settings.
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+
+    // Called at application launch: choose a new record at most once per day
+    // for the currently active source. Changing tabs NEVER calls this method.
+    func selectDailyIfNeeded() {
+        let key = dateKey(for: mode)
+        let stamp = todayStamp()
+        let legacyStamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .none)
+        let storedStamp = defaults.string(forKey: key)
+        let sameDay = storedStamp == stamp || storedStamp == legacyStamp
+        if !sameDay || !pool.contains(where: { $0.id == selectedID }) {
+            if let pick = pool.randomElement() { select(pick) }
+        }
+        defaults.set(stamp, forKey: key)
+    }
+
+    // After a refresh or a source change, only choose a new record if the
+    // previous one is genuinely unavailable. Never reshuffle on tab switches.
+    private func restoreValidSelection() {
+        guard !pool.contains(where: { $0.id == selectedID }) else { return }
+        if let first = pool.first { select(first) }
+        else { selectedID = "" }
+    }
+
     func setMode(_ value: CollectionMode) {
+        guard mode != value else { return }
+        if !selectedID.isEmpty {
+            defaults.set(selectedID, forKey: selectionKey(for: mode))
+        }
         mode = value
         defaults.set(value.rawValue, forKey: "vinyl.mode")
-        selectedID = ""
-        selectDailyIfNeeded()
+        selectedID = defaults.string(forKey: selectionKey(for: value)) ?? ""
+        restoreValidSelection()
+        // The initial selection for a source should also survive a later
+        // visit on the same or another day; automatic rotation is app-launch only.
+        defaults.set(todayStamp(), forKey: dateKey(for: value))
         Task { await updateAccent() }
     }
 
     func select(_ album: VinylAlbum) {
         selectedID = album.id
+        defaults.set(album.id, forKey: selectionKey(for: mode))
         defaults.set(album.id, forKey: "vinyl.selected")
         Task { await updateAccent() }
     }
@@ -219,7 +266,7 @@ final class VinylModel: ObservableObject {
     func removeManual(_ album: VinylAlbum) {
         manual.removeAll { $0.id == album.id }
         store(manual, key: "vinyl.manual")
-        if selectedID == album.id { selectedID = ""; selectDailyIfNeeded() }
+        if selectedID == album.id { selectedID = ""; restoreValidSelection() }
     }
 
     func setClientID() {
@@ -257,7 +304,8 @@ final class VinylModel: ObservableObject {
             recent = try await SpotifyAPI.shared.recentAlbums()
             store(recent, key: "vinyl.recent")
         } catch { errors.append("История: \(error.localizedDescription)") }
-        selectDailyIfNeeded()
+        // Network refresh should not change the record that was on screen.
+        restoreValidSelection()
         await updateAccent()
         let skipped = SpotifyAPI.shared.skippedSaved + SpotifyAPI.shared.skippedRecent
         let summary = "Синхронизация завершена. Сохранено: \(saved.count), недавно: \(recent.count)." + (skipped > 0 ? " Пропущено неполных записей: \(skipped)." : "")
