@@ -100,6 +100,7 @@ struct RemoteArtwork: View {
 struct TodayView: View {
     @EnvironmentObject var model: VinylModel
     @Environment(\.openURL) private var openURL
+    @State private var reviewAlbum: VinylAlbum?
 
     var body: some View {
         NavigationStack {
@@ -155,29 +156,19 @@ struct TodayView: View {
                         .modifier(VinylGlassButtonModifier())
                         .disabled(model.widgetBusy)
 
-                        HStack {
-                            Label("Моя оценка", systemImage: "star")
-                                .font(.subheadline.weight(.medium))
-                            Spacer()
-                            Menu {
-                                ForEach(1...10, id: \.self) { value in
-                                    Button("\(value) / 10") { model.rate(value, album: album) }
-                                }
-                                if model.ratings[album.id] != nil {
-                                    Button("Убрать оценку", role: .destructive) { model.rate(0, album: album) }
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Text(model.ratings[album.id].map { "\($0) / 10" } ?? "Оценить")
-                                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    Image(systemName: "chevron.down").font(.caption2)
-                                }
-                                .padding(.horizontal, 15).padding(.vertical, 10)
-                                .vinylGlassSurface(cornerRadius: 18)
+                        Button { reviewAlbum = album } label: {
+                            HStack {
+                                Label("Моя оценка", systemImage: "star")
+                                    .font(.subheadline.weight(.medium))
+                                Spacer()
+                                Text(model.ratings[album.id].map { "\($0) / 10 · Открыть" } ?? "Оценить альбом")
+                                    .font(.subheadline.weight(.semibold))
+                                Image(systemName: "chevron.right").font(.caption)
                             }
+                            .padding(17)
+                            .vinylGlassSurface(cornerRadius: 23)
                         }
-                        .padding(17)
-                        .vinylGlassSurface(cornerRadius: 23)
+                        .buttonStyle(.plain)
                     } else {
                         ContentUnavailableView("Нет альбомов", systemImage: "opticaldisc", description: Text("Подключи Spotify в настройках или добавь альбом через «Коллекция → +»."))
                             .frame(maxWidth: .infinity)
@@ -195,6 +186,9 @@ struct TodayView: View {
             }
             .background(VinylBackdrop(accent: model.accent))
             .toolbar(.hidden, for: .navigationBar)
+            .fullScreenCover(item: $reviewAlbum) { album in
+                AlbumReviewFlowView(album: album).environmentObject(model)
+            }
         }
     }
 }
@@ -232,6 +226,7 @@ struct VinylFeatureCard: View {
 struct AlbumListRow: View {
     let album: VinylAlbum
     let rating: Int?
+    var reviewDate: Date? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -239,7 +234,13 @@ struct AlbumListRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(album.name).font(.headline).lineLimit(1)
                 Text(album.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Text(album.year).font(.caption2).foregroundStyle(.tertiary)
+                if let reviewDate {
+                    Text("Оценён: " + reviewDate.formatted(date: .abbreviated, time: .omitted))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text(album.year).font(.caption2).foregroundStyle(.tertiary)
+                }
             }
             Spacer(minLength: 5)
             if let rating {
@@ -301,7 +302,7 @@ struct LibraryView: View {
 
 struct RatedAlbumsView: View {
     @EnvironmentObject var model: VinylModel
-    @State private var actionAlbum: VinylAlbum?
+    @State private var reviewAlbum: VinylAlbum?
     @State private var search = ""
 
     private var filtered: [VinylAlbum] {
@@ -312,8 +313,9 @@ struct RatedAlbumsView: View {
         NavigationStack {
             List {
                 ForEach(filtered) { album in
-                    Button { actionAlbum = album } label: {
-                        AlbumListRow(album: album, rating: model.ratings[album.id])
+                    Button { reviewAlbum = album } label: {
+                        AlbumListRow(album: album, rating: model.ratings[album.id],
+                                     reviewDate: model.review(for: album)?.ratedAt)
                     }
                     .buttonStyle(.plain)
                     .listRowBackground(Color.clear)
@@ -325,7 +327,9 @@ struct RatedAlbumsView: View {
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
             .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
-            .sheet(item: $actionAlbum) { AlbumActionsSheet(album: $0).environmentObject(model) }
+            .fullScreenCover(item: $reviewAlbum) { album in
+                AlbumReviewFlowView(album: album).environmentObject(model)
+            }
             .overlay {
                 if model.ratedAlbums.isEmpty {
                     ContentUnavailableView("Пока нет оценок", systemImage: "star", description: Text("Открой альбом в «Коллекции» и поставь ему оценку от 1 до 10."))
@@ -338,6 +342,7 @@ struct RatedAlbumsView: View {
 struct AlbumActionsSheet: View {
     let album: VinylAlbum
     @EnvironmentObject var model: VinylModel
+    @State private var showReview = false
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
@@ -389,22 +394,17 @@ struct AlbumActionsSheet: View {
                     }
                     .modifier(VinylGlassButtonModifier())
 
-                    Menu {
-                        ForEach(1...10, id: \.self) { rating in
-                            Button("\(rating) / 10") { model.rate(rating, album: album) }
-                        }
-                        if model.ratings[album.id] != nil {
-                            Button("Убрать оценку", role: .destructive) { model.rate(0, album: album) }
-                        }
-                    } label: {
+                    Button { showReview = true } label: {
                         HStack {
-                            Label("Моя оценка", systemImage: "star")
+                            Label(model.ratings[album.id] == nil ? "Оценить альбом" : "Моя рецензия", systemImage: "star")
                             Spacer()
-                            Text(model.ratings[album.id].map { "\($0)/10" } ?? "Выбрать")
+                            Text(model.ratings[album.id].map { "\($0) / 10" } ?? "Открыть")
+                            Image(systemName: "chevron.right").font(.caption)
                         }
                         .padding(14)
                         .vinylGlassSurface(cornerRadius: 17)
                     }
+                    .buttonStyle(.plain)
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity)
@@ -415,6 +415,9 @@ struct AlbumActionsSheet: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
         }
         .presentationDetents([.large])
+        .fullScreenCover(isPresented: $showReview) {
+            AlbumReviewFlowView(album: album).environmentObject(model)
+        }
     }
 }
 
@@ -475,7 +478,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("О приложении") {
-                    Text("VINYL 1.2 — Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("VINYL 1.3 — Reviews & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
                     Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
