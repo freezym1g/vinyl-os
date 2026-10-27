@@ -26,38 +26,8 @@ enum SpotifyFailure: LocalizedError {
     }
 }
 
-struct AlbumDTO: Decodable {
-    let id: String
-    let name: String
-    let artists: [ArtistDTO]?
-    let release_date: String?
-    let images: [ImageDTO]?
-    let external_urls: ExternalURLs?
-
-    func asVinylAlbum() -> VinylAlbum {
-        VinylAlbum(id: id,
-                   name: name,
-                   artist: (artists ?? []).map(\.name).joined(separator: ", "),
-                   year: String((release_date ?? "—").prefix(4)),
-                   artURL: images?.first?.url ?? "",
-                   spotifyURL: external_urls?.spotify ?? "https://open.spotify.com/album/\(id)")
-    }
-}
-struct ArtistDTO: Decodable { let name: String }
-struct ImageDTO: Decodable { let url: String }
-struct ExternalURLs: Decodable { let spotify: String? }
-struct SavedAlbumsDTO: Decodable {
-    struct Item: Decodable { let album: AlbumDTO? }
-    let items: [Item]
-    let next: String?
-}
-struct RecentTracksDTO: Decodable {
-    struct Item: Decodable {
-        struct Track: Decodable { let album: AlbumDTO? }
-        let track: Track?
-    }
-    let items: [Item]
-}
+// Spotify отдаёт иногда неполные/недоступные альбомы. Сохранённые
+// альбомы разбираются по одному, чтобы один элемент не ломал всю страницу.
 
 @MainActor
 final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProviding {
@@ -175,7 +145,8 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
         return token
     }
 
-    private func get<T: Decodable>(_ url: URL) async throws -> T {
+    // Получаем один JSON-объект и проверяем HTTP-код до его обработки.
+    private func getJSON(_ url: URL) async throws -> [String: Any] {
         let bearer = try await accessToken()
         var request = URLRequest(url: url)
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
@@ -184,34 +155,90 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw SpotifyFailure.badResponse("Spotify API (\(status)): \(Self.errorText(data))")
         }
-        do {
-            return try JSONDecoder().decode(T.self, from: data)
-        } catch {
-            let preview = String(data: data.prefix(350), encoding: .utf8) ?? "(не текстовый ответ)"
-            throw SpotifyFailure.badResponse("Spotify вернул неожиданные данные: \(error.localizedDescription). Ответ: \(preview)")
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let json = object as? [String: Any] else {
+            throw SpotifyFailure.badResponse("Spotify вернул некорректный JSON (\(url.path)).")
         }
+        return json
     }
+
+    // У альбома могут отсутствовать обложка, год, ссылка или исполнители.
+    // Обязательны только ID и название: без них нельзя показать запись.
+    private static func parseAlbum(_ value: Any?) -> VinylAlbum? {
+        guard let data = value as? [String: Any],
+              let id = data["id"] as? String, !id.isEmpty,
+              let name = data["name"] as? String, !name.isEmpty else { return nil }
+        let artists = (data["artists"] as? [Any] ?? [])
+            .compactMap { ($0 as? [String: Any])?["name"] as? String }
+        let images = (data["images"] as? [Any] ?? [])
+            .compactMap { ($0 as? [String: Any])?["url"] as? String }
+        let links = data["external_urls"] as? [String: Any]
+        let date = data["release_date"] as? String ?? ""
+        return VinylAlbum(id: id,
+                          name: name,
+                          artist: artists.isEmpty ? "Неизвестный исполнитель" : artists.joined(separator: ", "),
+                          year: date.isEmpty ? "—" : String(date.prefix(4)),
+                          artURL: images.first ?? "",
+                          spotifyURL: links?["spotify"] as? String ?? "https://open.spotify.com/album/\(id)")
+    }
+
+    private(set) var skippedSaved = 0
+    private(set) var skippedRecent = 0
 
     func savedAlbums() async throws -> [VinylAlbum] {
         var results: [VinylAlbum] = []
         var next: String? = "https://api.spotify.com/v1/me/albums?limit=50"
         var pages = 0
+        var encountered = 0
+        skippedSaved = 0
         while let link = next, let url = URL(string: link), pages < 20 {
-            let response: SavedAlbumsDTO = try await get(url)
-            results += response.items.compactMap { $0.album?.asVinylAlbum() }
-            next = response.next
+            let json = try await getJSON(url)
+            guard let items = json["items"] as? [Any] else {
+                throw SpotifyFailure.badResponse("Spotify вернул страницу без массива items (\(url.path)).")
+            }
+            encountered += items.count
+            for value in items {
+                let wrapped = value as? [String: Any]
+                if let album = Self.parseAlbum(wrapped?["album"]) {
+                    results.append(album)
+                } else {
+                    skippedSaved += 1
+                }
+            }
+            next = json["next"] as? String
             pages += 1
+        }
+        // Не перезаписываем ранее сохранённую библиотеку пустотой, если
+        // Spotify вернул элементы, но ни один не удалось разобрать.
+        if encountered > 0 && results.isEmpty {
+            throw SpotifyFailure.badResponse("Все записи библиотеки Spotify оказались неполными. Старый кеш сохранён.")
+        }
+        if skippedSaved > 0 {
+            print("VINYL: пропущено неполных альбомов: \(skippedSaved)")
         }
         return results
     }
 
     func recentAlbums() async throws -> [VinylAlbum] {
-        let response: RecentTracksDTO = try await get(URL(string: "https://api.spotify.com/v1/me/player/recently-played?limit=50")!)
-        var seen = Set<String>()
-        return response.items.compactMap { item in
-            guard let album = item.track?.album?.asVinylAlbum() else { return nil }
-            return seen.insert(album.id).inserted ? album : nil
+        skippedRecent = 0
+        let json = try await getJSON(URL(string: "https://api.spotify.com/v1/me/player/recently-played?limit=50")!)
+        guard let items = json["items"] as? [Any] else {
+            throw SpotifyFailure.badResponse("Spotify вернул историю без массива items.")
         }
+        var seen = Set<String>()
+        var results: [VinylAlbum] = []
+        for value in items {
+            let track = (value as? [String: Any])?["track"] as? [String: Any]
+            guard let album = Self.parseAlbum(track?["album"]) else {
+                skippedRecent += 1
+                continue
+            }
+            if seen.insert(album.id).inserted { results.append(album) }
+        }
+        if skippedRecent > 0 {
+            print("VINYL: пропущено записей истории: \(skippedRecent)")
+        }
+        return results
     }
 
     private static func randomBytes(count: Int) -> Data {
