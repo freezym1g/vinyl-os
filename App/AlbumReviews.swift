@@ -191,6 +191,8 @@ private struct AlbumReviewDetailView: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 4)
 
+                ReviewShareButton(album: album, review: review)
+
                 Button(role: .destructive, action: onRemove) {
                     Label("Удалить оценку", systemImage: "trash")
                         .frame(maxWidth: .infinity)
