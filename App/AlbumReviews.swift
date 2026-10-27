@@ -33,6 +33,7 @@ private enum ReviewDateLabel {
 /// in the top-right corner opens the editor without losing the first date.
 struct AlbumReviewFlowView: View {
     let album: VinylAlbum
+    var startInEditor: Bool = false
     @EnvironmentObject private var model: VinylModel
     @Environment(\.dismiss) private var dismiss
     @State private var editing = false
@@ -84,6 +85,9 @@ struct AlbumReviewFlowView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            if startInEditor && existing != nil { editing = true }
+        }
     }
 }
 
