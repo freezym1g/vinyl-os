@@ -322,9 +322,16 @@ private enum RatedShelf: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private struct RatedReviewDestination: Identifiable {
+    let album: VinylAlbum
+    let openEditor: Bool
+    var id: String { album.id }
+}
+
 struct RatedAlbumsView: View {
     @EnvironmentObject var model: VinylModel
-    @State private var reviewAlbum: VinylAlbum?
+    @State private var destination: RatedReviewDestination?
+    @State private var pendingDeletion: VinylAlbum?
     @State private var search = ""
     @State private var shelf: RatedShelf = .list
 
@@ -332,6 +339,14 @@ struct RatedAlbumsView: View {
         model.ratedAlbums.filter {
             search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search)
         }
+    }
+
+    private var deletionPresented: Binding<Bool> {
+        Binding(get: { pendingDeletion != nil }, set: { if !$0 { pendingDeletion = nil } })
+    }
+
+    private func open(_ album: VinylAlbum, edit: Bool = false) {
+        destination = RatedReviewDestination(album: album, openEditor: edit)
     }
 
     var body: some View {
@@ -349,19 +364,31 @@ struct RatedAlbumsView: View {
                 case .list:
                     List {
                         ForEach(filtered) { album in
-                            Button { reviewAlbum = album } label: {
+                            Button { open(album) } label: {
                                 AlbumListRow(album: album, rating: model.ratings[album.id],
                                              reviewDate: model.review(for: album)?.ratedAt)
                             }
                             .buttonStyle(.plain)
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) { pendingDeletion = album } label: {
+                                    Label("Удалить", systemImage: "trash")
+                                }
+                                Button { open(album, edit: true) } label: {
+                                    Label("Изменить", systemImage: "pencil")
+                                }
+                                .tint(.indigo)
+                            }
                         }
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
                 case .diary:
-                    VinylDiaryView(albums: filtered) { reviewAlbum = $0 }
+                    VinylDiaryView(albums: filtered,
+                                   onSelect: { open($0) },
+                                   onEdit: { open($0, edit: true) },
+                                   onDelete: { pendingDeletion = $0 })
                 case .stats:
                     VinylStatisticsView()
                 }
@@ -369,8 +396,19 @@ struct RatedAlbumsView: View {
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
             .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
-            .fullScreenCover(item: $reviewAlbum) { album in
-                AlbumReviewFlowView(album: album).environmentObject(model)
+            .fullScreenCover(item: $destination) { target in
+                AlbumReviewFlowView(album: target.album, startInEditor: target.openEditor)
+                    .environmentObject(model)
+            }
+            .confirmationDialog("Удалить оценку и рецензию?", isPresented: deletionPresented,
+                                titleVisibility: .visible) {
+                Button("Удалить оценку", role: .destructive) {
+                    if let album = pendingDeletion { model.deleteReview(for: album) }
+                    pendingDeletion = nil
+                }
+                Button("Отмена", role: .cancel) { pendingDeletion = nil }
+            } message: {
+                Text("Исчезнут балл, любимые треки и комментарий только в VINYL. Альбом останется в Spotify и коллекции.")
             }
             .overlay {
                 if model.ratedAlbums.isEmpty {
@@ -564,7 +602,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("О приложении") {
-                    Text("VINYL 1.4 — Music Journal & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("VINYL 1.4.1 — Music Journal & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
                     Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
