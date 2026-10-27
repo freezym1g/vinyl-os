@@ -6,7 +6,6 @@ import WidgetKit
 enum CollectionMode: String, CaseIterable, Identifiable {
     case saved = "Моя библиотека"
     case recent = "Недавно слушал"
-    case manual = "По ссылкам"
     var id: String { rawValue }
 }
 
@@ -30,9 +29,11 @@ final class VinylModel: ObservableObject {
 
     var pool: [VinylAlbum] {
         switch mode {
-        case .saved: return saved
+        case .saved:
+            // Links added manually remain available inside the normal library mode.
+            var visited = Set<String>()
+            return (saved + manual).filter { visited.insert($0.id).inserted }
         case .recent: return recent
-        case .manual: return manual
         }
     }
     var current: VinylAlbum? { pool.first(where: { $0.id == selectedID }) ?? pool.first }
@@ -174,7 +175,7 @@ final class VinylModel: ObservableObject {
         manual.removeAll { $0.id == albumID }
         manual.insert(record, at: 0)
         store(manual, key: "vinyl.manual")
-        setMode(.manual)
+        setMode(.saved)
         select(record)
         message = "Альбом добавлен по ссылке."
     }
