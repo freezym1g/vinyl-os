@@ -18,6 +18,8 @@ final class VinylModel: ObservableObject {
     @Published var mode: CollectionMode = .saved
     @Published var ratings: [String: Int] = [:]
     @Published var ratedSnapshots: [String: VinylAlbum] = [:]
+    // Rich reviews are stored separately: existing 1–10 ratings remain compatible.
+    @Published private(set) var reviews: [String: AlbumReview] = [:]
     @Published var widgetGistID: String = GistWidgetSync.shared.gistID
     @Published var widgetBusy = false
     @Published var isLoading = false
@@ -58,6 +60,11 @@ final class VinylModel: ObservableObject {
         manual = read([VinylAlbum].self, key: "vinyl.manual") ?? []
         ratings = read([String: Int].self, key: "vinyl.ratings") ?? [:]
         ratedSnapshots = read([String: VinylAlbum].self, key: "vinyl.rated.snapshots") ?? [:]
+        reviews = read([String: AlbumReview].self, key: "vinyl.album.reviews.v1") ?? [:]
+        // Reviews from previous updates don't override newer legacy scores.
+        for (id, review) in reviews where ratings[id] == nil {
+            ratings[id] = review.score
+        }
         mode = CollectionMode(rawValue: defaults.string(forKey: "vinyl.mode") ?? "") ?? .saved
         selectedID = defaults.string(forKey: "vinyl.selected") ?? ""
         selectDailyIfNeeded()
@@ -99,16 +106,45 @@ final class VinylModel: ObservableObject {
         let options = pool.filter { $0.id != current?.id }
         if let pick = (options.isEmpty ? pool : options).randomElement() { select(pick) }
     }
-    func rate(_ value: Int, album: VinylAlbum) {
-        if value == 0 {
-            ratings.removeValue(forKey: album.id)
-            ratedSnapshots.removeValue(forKey: album.id)
-        } else {
-            ratings[album.id] = min(10, max(1, value))
-            ratedSnapshots[album.id] = album
-        }
+    // Legacy ratings from VINYL 1.2 show up as reviews without an invented date.
+    // Their date is set when the user first saves a full review in VINYL 1.3.
+    func review(for album: VinylAlbum) -> AlbumReview? {
+        if let review = reviews[album.id] { return review }
+        guard let score = ratings[album.id], (1...10).contains(score) else { return nil }
+        return AlbumReview(score: score, bestTracks: [], comment: "", ratedAt: nil, updatedAt: nil)
+    }
+
+    func saveReview(score: Int, bestTracks: [ReviewTrack], comment: String, for album: VinylAlbum) {
+        guard (1...10).contains(score) else { return }
+        let now = Date()
+        // Preserve original review date when editing; never pretend to know the
+        // original date for 1.2.x ratings that did not store a timestamp.
+        let firstDate = reviews[album.id]?.ratedAt ?? now
+        let cleanComment = String(comment.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+        let review = AlbumReview(score: score, bestTracks: bestTracks, comment: cleanComment,
+                                 ratedAt: firstDate, updatedAt: now)
+        reviews[album.id] = review
+        ratings[album.id] = score
+        ratedSnapshots[album.id] = album
+        store(reviews, key: "vinyl.album.reviews.v1")
         store(ratings, key: "vinyl.ratings")
         store(ratedSnapshots, key: "vinyl.rated.snapshots")
+    }
+
+    func deleteReview(for album: VinylAlbum) {
+        reviews.removeValue(forKey: album.id)
+        ratings.removeValue(forKey: album.id)
+        ratedSnapshots.removeValue(forKey: album.id)
+        store(reviews, key: "vinyl.album.reviews.v1")
+        store(ratings, key: "vinyl.ratings")
+        store(ratedSnapshots, key: "vinyl.rated.snapshots")
+    }
+
+    // Compatibility with old call sites / data format.
+    func rate(_ value: Int, album: VinylAlbum) {
+        if value == 0 { deleteReview(for: album) }
+        else { saveReview(score: min(10, max(1, value)), bestTracks: review(for: album)?.bestTracks ?? [],
+                          comment: review(for: album)?.comment ?? "", for: album) }
     }
 
     func saveGitHubToken(_ value: String) {
