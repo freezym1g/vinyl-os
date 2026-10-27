@@ -30,11 +30,29 @@ struct VinylGlassButtonModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
-            if prominent { content.buttonStyle(.glassProminent) }
-            else { content.buttonStyle(.glass) }
+            if prominent {
+                // TabView has a white tint. Without an explicit button tint,
+                // .glassProminent inherits it and creates a white-on-white pill.
+                content
+                    .buttonStyle(.glassProminent)
+                    .tint(Color(red: 0.25, green: 0.27, blue: 0.33))
+                    .foregroundStyle(.white)
+            } else {
+                content
+                    .buttonStyle(.glass)
+                    .foregroundStyle(.white)
+            }
         } else {
-            if prominent { content.buttonStyle(.borderedProminent).tint(.gray.opacity(0.65)) }
-            else { content.buttonStyle(.bordered) }
+            if prominent {
+                content
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.25, green: 0.27, blue: 0.33))
+                    .foregroundStyle(.white)
+            } else {
+                content
+                    .buttonStyle(.bordered)
+                    .foregroundStyle(.white)
+            }
         }
     }
 }
