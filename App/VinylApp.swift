@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct VinylOfTheDayApp: App {
@@ -251,71 +252,120 @@ struct AlbumListRow: View {
     }
 }
 
+private enum LibraryShelf: String, CaseIterable, Identifiable {
+    case everything = "Все альбомы"
+    case toListen = "Хочу послушать"
+    var id: String { rawValue }
+}
+
 struct LibraryView: View {
     @EnvironmentObject var model: VinylModel
     @State private var search = ""
     @State private var showAdd = false
     @State private var actionAlbum: VinylAlbum?
+    @State private var shelf: LibraryShelf = .everything
 
     private var filtered: [VinylAlbum] {
-        model.allAlbums.filter {
+        let source = shelf == .everything ? model.allAlbums : model.wishlistedAlbums
+        return source.filter {
             search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search)
         }
     }
 
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(filtered) { album in
-                    Button { actionAlbum = album } label: {
-                        AlbumListRow(album: album, rating: model.ratings[album.id])
+            VStack(spacing: 0) {
+                Picker("Коллекция", selection: $shelf) {
+                    ForEach(LibraryShelf.allCases) { choice in Text(choice.rawValue).tag(choice) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                List {
+                    ForEach(filtered) { album in
+                        Button { actionAlbum = album } label: {
+                            AlbumListRow(album: album, rating: model.ratings[album.id])
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .overlay {
+                    if filtered.isEmpty {
+                        ContentUnavailableView(
+                            shelf == .toListen ? "Список пока пуст" : "Альбомы не найдены",
+                            systemImage: shelf == .toListen ? "bookmark" : "square.stack",
+                            description: Text(shelf == .toListen
+                                ? "Открой альбом в коллекции и нажми «Хочу послушать»."
+                                : "Синхронизируй Spotify или добавь альбом по ссылке через +."))
+                    }
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Альбом или исполнитель")
-            .navigationTitle("Коллекция · \(filtered.count)")
+            .navigationTitle(shelf == .toListen ? "Хочу послушать · \(filtered.count)" : "Коллекция · \(filtered.count)")
             .toolbar { Button { showAdd = true } label: { Label("Добавить ссылку Spotify", systemImage: "plus") } }
             .sheet(isPresented: $showAdd) { AddSpotifyLinkView().environmentObject(model) }
             .sheet(item: $actionAlbum) { AlbumActionsSheet(album: $0).environmentObject(model) }
-            .overlay {
-                if model.allAlbums.isEmpty {
-                    ContentUnavailableView("Коллекция пуста", systemImage: "square.stack", description: Text("Добавь ссылку на альбом кнопкой + или подключи Spotify."))
-                }
-            }
         }
     }
+}
+
+private enum RatedShelf: String, CaseIterable, Identifiable {
+    case list = "Оценки"
+    case diary = "Дневник"
+    case stats = "Статистика"
+    var id: String { rawValue }
 }
 
 struct RatedAlbumsView: View {
     @EnvironmentObject var model: VinylModel
     @State private var reviewAlbum: VinylAlbum?
     @State private var search = ""
+    @State private var shelf: RatedShelf = .list
 
     private var filtered: [VinylAlbum] {
-        model.ratedAlbums.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search) }
+        model.ratedAlbums.filter {
+            search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search)
+        }
     }
 
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(filtered) { album in
-                    Button { reviewAlbum = album } label: {
-                        AlbumListRow(album: album, rating: model.ratings[album.id],
-                                     reviewDate: model.review(for: album)?.ratedAt)
+            VStack(spacing: 0) {
+                Picker("Оценённые", selection: $shelf) {
+                    ForEach(RatedShelf.allCases) { choice in Text(choice.rawValue).tag(choice) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+
+                switch shelf {
+                case .list:
+                    List {
+                        ForEach(filtered) { album in
+                            Button { reviewAlbum = album } label: {
+                                AlbumListRow(album: album, rating: model.ratings[album.id],
+                                             reviewDate: model.review(for: album)?.ratedAt)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                case .diary:
+                    VinylDiaryView(albums: filtered) { reviewAlbum = $0 }
+                case .stats:
+                    VinylStatisticsView()
                 }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
             .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
@@ -387,6 +437,13 @@ struct AlbumActionsSheet: View {
                     .modifier(VinylGlassButtonModifier(prominent: true))
                     .disabled(model.widgetBusy)
 
+                    Button { model.toggleWishlist(album) } label: {
+                        Label(model.isWishlisted(album) ? "Убрать из «Хочу послушать»" : "Хочу послушать",
+                              systemImage: model.isWishlisted(album) ? "bookmark.fill" : "bookmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .modifier(VinylGlassButtonModifier())
+
                     if let spotify = album.link {
                         Button {
                             openURL(spotify)
@@ -439,6 +496,11 @@ struct SettingsView: View {
     @EnvironmentObject var model: VinylModel
     @State private var githubToken = ""
     @State private var savedToken = false
+    @State private var exporting = false
+    @State private var importing = false
+    @State private var exportDocument: VinylBackupDocument?
+    @State private var pendingBackup: VinylBackupPayload?
+    @State private var confirmImport = false
 
     var body: some View {
         NavigationStack {
@@ -491,8 +553,18 @@ struct SettingsView: View {
                     Text("Gist не индексируется как публичный, но любой, кто получит ссылку, сможет увидеть выбранный альбом. Для обновления требуется интернет; iOS решает, когда перерисовать виджет.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section("Резервное копирование") {
+                    Button { createBackup() } label: {
+                        Label("Сохранить резервную копию JSON", systemImage: "square.and.arrow.up")
+                    }
+                    Button { importing = true } label: {
+                        Label("Восстановить из JSON", systemImage: "square.and.arrow.down")
+                    }
+                    Text("Экспорт содержит оценки, рецензии, даты, лучшие треки, список «Хочу послушать» и локальные списки альбомов. Токены Spotify и GitHub не экспортируются. Храни копию в «Файлах» вне приложения.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("О приложении") {
-                    Text("VINYL 1.3 — Reviews & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("VINYL 1.4 — Music Journal & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
                     Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
@@ -500,6 +572,49 @@ struct SettingsView: View {
             .background(VinylBackdrop(accent: model.accent))
             .navigationTitle("Настройки")
             .onAppear { savedToken = GistWidgetSync.shared.hasToken }
+            .fileExporter(isPresented: $exporting, document: exportDocument,
+                          contentType: .json, defaultFilename: "VINYL-backup-1.4") { result in
+                if case .failure(let error) = result { model.message = "Не удалось сохранить копию: \(error.localizedDescription)" }
+            }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
+                switch result {
+                case .success(let url):
+                    let granted = url.startAccessingSecurityScopedResource()
+                    defer { if granted { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        let data = try Data(contentsOf: url)
+                        pendingBackup = try model.inspectBackup(data)
+                        confirmImport = true
+                    } catch {
+                        model.message = "Не удалось прочитать JSON: \(error.localizedDescription)"
+                    }
+                case .failure(let error):
+                    model.message = "Не удалось выбрать файл: \(error.localizedDescription)"
+                }
+            }
+            .confirmationDialog("Как восстановить резервную копию?", isPresented: $confirmImport,
+                                titleVisibility: .visible) {
+                Button("Объединить с текущими данными") {
+                    if let pendingBackup { model.restoreBackup(pendingBackup, replace: false) }
+                    pendingBackup = nil
+                }
+                Button("Заменить локальные данные", role: .destructive) {
+                    if let pendingBackup { model.restoreBackup(pendingBackup, replace: true) }
+                    pendingBackup = nil
+                }
+                Button("Отмена", role: .cancel) { pendingBackup = nil }
+            } message: {
+                Text("Объединение сохраняет существующие рецензии при совпадении альбомов. Замена перезапишет локальные данные. Токены Spotify и GitHub останутся на устройстве.")
+            }
+        }
+    }
+
+    private func createBackup() {
+        do {
+            exportDocument = VinylBackupDocument(data: try model.exportBackupData())
+            exporting = true
+        } catch {
+            model.message = "Не удалось создать резервную копию: \(error.localizedDescription)"
         }
     }
 }
