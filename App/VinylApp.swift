@@ -54,66 +54,100 @@ struct RemoteArtwork: View {
 struct TodayView: View {
     @EnvironmentObject var model: VinylModel
     @Environment(\.openURL) private var openURL
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    HStack {
-                        Text("VINYL").font(.system(size: 33, weight: .black, design: .rounded))
+                    HStack(spacing: 16) {
+                        Text("VINYL")
+                            .font(.system(size: 36, weight: .black, design: .rounded))
+                            .tracking(-1.2)
                         Spacer()
                         Button { Task { await model.synchronize() } } label: {
                             Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 17, weight: .medium))
+                                .frame(width: 46, height: 46)
                         }
+                        .modifier(VinylGlassButtonModifier())
                         .disabled(model.isLoading)
                         .accessibilityLabel("Синхронизировать Spotify")
                     }
+
+                    // Only saved and recently played modes. Manually added links
+                    // remain in Collection and participate in "Моя библиотека".
                     Picker("Источник", selection: Binding(get: { model.mode }, set: { model.setMode($0) })) {
-                        ForEach(CollectionMode.allCases) { item in Text(item.rawValue).tag(item) }
-                    }.pickerStyle(.segmented)
+                        ForEach(CollectionMode.allCases) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(5)
+                    .vinylGlassSurface(cornerRadius: 17)
+
                     if let album = model.current {
                         VinylFeatureCard(album: album, accent: model.accent)
-                        HStack(spacing: 14) {
+
+                        HStack(spacing: 12) {
                             Button { model.shuffle() } label: {
                                 Label("Другой альбом", systemImage: "shuffle")
                                     .frame(maxWidth: .infinity)
-                            }.buttonStyle(.borderedProminent).tint(.gray.opacity(0.35))
+                            }
+                            .modifier(VinylGlassButtonModifier(prominent: true))
                             if let link = album.link {
                                 Button { openURL(link) } label: {
                                     Label("Spotify", systemImage: "play.fill")
-                                }.buttonStyle(.borderedProminent).tint(.green)
+                                }
+                                .modifier(VinylGlassButtonModifier())
                             }
                         }
-                        Button {
-                            Task { await model.publishToWidget(album) }
-                        } label: {
+
+                        Button { Task { await model.publishToWidget(album) } } label: {
                             Label(model.widgetBusy ? "Отправляем…" : "Добавить в виджет", systemImage: "plus.rectangle.on.rectangle")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.bordered)
+                        .modifier(VinylGlassButtonModifier())
                         .disabled(model.widgetBusy)
+
                         HStack {
-                            Text("Моя оценка")
+                            Label("Моя оценка", systemImage: "star")
+                                .font(.subheadline.weight(.medium))
                             Spacer()
                             Menu {
                                 ForEach(1...10, id: \.self) { value in
                                     Button("\(value) / 10") { model.rate(value, album: album) }
                                 }
-                                Button("Убрать оценку") { model.rate(0, album: album) }
+                                if model.ratings[album.id] != nil {
+                                    Button("Убрать оценку", role: .destructive) { model.rate(0, album: album) }
+                                }
                             } label: {
-                                Text(model.ratings[album.id].map { "\($0) / 10" } ?? "Оценить")
-                                    .bold().padding(.horizontal, 14).padding(.vertical, 8)
-                                    .background(.white.opacity(0.12), in: Capsule())
+                                HStack(spacing: 8) {
+                                    Text(model.ratings[album.id].map { "\($0) / 10" } ?? "Оценить")
+                                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    Image(systemName: "chevron.down").font(.caption2)
+                                }
+                                .padding(.horizontal, 15).padding(.vertical, 10)
+                                .vinylGlassSurface(cornerRadius: 18)
                             }
                         }
+                        .padding(17)
+                        .vinylGlassSurface(cornerRadius: 23)
                     } else {
-                        ContentUnavailableView("Нет альбомов", systemImage: "opticaldisc", description: Text("Подключи Spotify в настройках или добавь альбом по ссылке в «Коллекции»."))
+                        ContentUnavailableView("Нет альбомов", systemImage: "opticaldisc", description: Text("Подключи Spotify в настройках или добавь альбом через «Коллекция → +»."))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
                     }
-                    Text("Для синхронизации с виджетом настрой GitHub Gist в «Настройки → Виджет». Бесплатная подпись не поддерживает общее хранилище приложения и виджета.")
-                        .font(.footnote).foregroundStyle(.secondary)
+
+                    Text("Для синхронизации с виджетом настрой GitHub Gist в «Настройки → Виджет».")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
                 }
-                .padding(20)
+                .padding(.horizontal, 20)
+                .padding(.top, 17)
+                .padding(.bottom, 34)
             }
-            .background(Color(red: 0.09, green: 0.09, blue: 0.085))
+            .background(VinylBackdrop(accent: model.accent))
             .toolbar(.hidden, for: .navigationBar)
         }
     }
@@ -122,17 +156,29 @@ struct TodayView: View {
 struct VinylFeatureCard: View {
     let album: VinylAlbum
     let accent: RGBColor
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 17) {
+        VStack(alignment: .leading, spacing: 15) {
             RemoteArtwork(url: album.artwork)
-            Text("TODAY’S RECORD").font(.system(size: 11, weight: .bold, design: .rounded)).tracking(1.5).opacity(0.65)
-            Text(album.name).font(.system(size: 34, weight: .bold)).lineLimit(2).minimumScaleFactor(0.6)
-            Text(album.artist).font(.title3).opacity(0.88)
-            Text(album.year).foregroundStyle(.white.opacity(0.75))
+                .frame(maxWidth: .infinity)
+                .shadow(color: .black.opacity(0.35), radius: 20, y: 12)
+            Text("TODAY’S RECORD")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .tracking(1.5)
+                .foregroundStyle(.white.opacity(0.65))
+            Text(album.name)
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .lineLimit(2).minimumScaleFactor(0.6)
+            Text(album.artist).font(.title3).foregroundStyle(.white.opacity(0.86))
+            Text(album.year).foregroundStyle(.white.opacity(0.65))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(23)
-        .background(accent.swiftUIColor, in: RoundedRectangle(cornerRadius: 28))
+        .padding(22)
+        .background {
+            RoundedRectangle(cornerRadius: 31, style: .continuous)
+                .fill(LinearGradient(colors: [accent.swiftUIColor.opacity(0.92), Color.black.opacity(0.36)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        .vinylGlassSurface(cornerRadius: 31)
     }
 }
 
@@ -154,12 +200,14 @@ struct AlbumListRow: View {
                 Text("\(rating)/10")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.white.opacity(0.11), in: Capsule())
+                    .vinylGlassSurface(cornerRadius: 16)
             } else {
                 Image(systemName: "chevron.right")
                     .font(.footnote).foregroundStyle(.tertiary)
             }
         }
+        .padding(13)
+        .vinylGlassSurface(cornerRadius: 22)
         .contentShape(Rectangle())
     }
 }
@@ -184,9 +232,13 @@ struct LibraryView: View {
                         AlbumListRow(album: album, rating: model.ratings[album.id])
                     }
                     .buttonStyle(.plain)
-                    .listRowBackground(Color.white.opacity(0.045))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Альбом или исполнитель")
             .navigationTitle("Коллекция · \(filtered.count)")
             .toolbar { Button { showAdd = true } label: { Label("Добавить ссылку Spotify", systemImage: "plus") } }
@@ -218,9 +270,13 @@ struct RatedAlbumsView: View {
                         AlbumListRow(album: album, rating: model.ratings[album.id])
                     }
                     .buttonStyle(.plain)
-                    .listRowBackground(Color.white.opacity(0.045))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
             .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
             .sheet(item: $actionAlbum) { AlbumActionsSheet(album: $0).environmentObject(model) }
@@ -263,8 +319,7 @@ struct AlbumActionsSheet: View {
                         Label(model.widgetBusy ? "Отправляем в виджет…" : "Добавить в виджет", systemImage: "plus.rectangle.on.rectangle")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.white.opacity(0.21))
+                    .modifier(VinylGlassButtonModifier(prominent: true))
                     .disabled(model.widgetBusy)
 
                     if let spotify = album.link {
@@ -274,12 +329,11 @@ struct AlbumActionsSheet: View {
                             Label("Открыть в Spotify", systemImage: "play.fill")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.bordered)
+                        .modifier(VinylGlassButtonModifier())
                     }
 
                     Button {
-                        if model.saved.contains(where: { $0.id == album.id }) { model.setMode(.saved) }
-                        else if model.manual.contains(where: { $0.id == album.id }) { model.setMode(.manual) }
+                        if model.saved.contains(where: { $0.id == album.id }) || model.manual.contains(where: { $0.id == album.id }) { model.setMode(.saved) }
                         else { model.setMode(.recent) }
                         model.select(album)
                         dismiss()
@@ -287,7 +341,7 @@ struct AlbumActionsSheet: View {
                         Label("Показать на главном экране", systemImage: "square.stack")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
+                    .modifier(VinylGlassButtonModifier())
 
                     Menu {
                         ForEach(1...10, id: \.self) { rating in
@@ -303,13 +357,13 @@ struct AlbumActionsSheet: View {
                             Text(model.ratings[album.id].map { "\($0)/10" } ?? "Выбрать")
                         }
                         .padding(14)
-                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                        .vinylGlassSurface(cornerRadius: 17)
                     }
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity)
             }
-            .background(Color(red: 0.09, green: 0.09, blue: 0.085))
+            .background(VinylBackdrop(accent: model.accent))
             .navigationTitle("Альбом")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
@@ -375,10 +429,12 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("О приложении") {
-                    Text("VINYL 1.1 — бесплатная локальная сборка. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("VINYL 1.2 — Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
                     Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(VinylBackdrop(accent: model.accent))
             .navigationTitle("Настройки")
             .onAppear { savedToken = GistWidgetSync.shared.hasToken }
         }
@@ -422,6 +478,8 @@ struct AddSpotifyLinkView: View {
                 }
                 .disabled(link.isEmpty || adding)
             }
+            .scrollContentBackground(.hidden)
+            .background(VinylBackdrop(accent: model.accent))
             .navigationTitle("Альбом по ссылке")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Закрыть") { dismiss() } } }
