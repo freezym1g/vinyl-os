@@ -10,10 +10,56 @@ struct VinylOfTheDayApp: App {
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
                 .onOpenURL { url in
-                    if url.scheme == "vinyl-of-day" && url.host == "shuffle-widget" {
-                        Task { await model.nextWidgetAlbum() }
+                    // WidgetKit normally activates its containing app for Link taps.
+                    // We must explicitly hand the album off to Spotify.
+                    if url.scheme == "vinyl-of-day" {
+                        switch url.host {
+                        case "shuffle-widget":
+                            Task { await model.nextWidgetAlbum() }
+                        case "open-spotify":
+                            SpotifyWidgetRouter.openFromWidgetLink(url)
+                        default:
+                            break
+                        }
+                    } else if url.host?.lowercased() == "open.spotify.com" {
+                        // Compatibility with existing widget snapshots using a
+                        // direct Spotify URL instead of our explicit callback.
+                        SpotifyWidgetRouter.openSpotifyAlbum(url)
                     }
                 }
+        }
+    }
+}
+
+/// Routes taps from the WidgetKit extension to the corresponding Spotify album.
+/// WidgetKit may foreground VINYL first; the host app then launches Spotify.
+@MainActor
+private enum SpotifyWidgetRouter {
+    static func openFromWidgetLink(_ callback: URL) {
+        guard let parts = URLComponents(url: callback, resolvingAgainstBaseURL: false),
+              let raw = parts.queryItems?.first(where: { $0.name == "url" })?.value,
+              let albumURL = URL(string: raw) else { return }
+        openSpotifyAlbum(albumURL)
+    }
+
+    static func openSpotifyAlbum(_ target: URL) {
+        guard target.scheme?.lowercased() == "https",
+              target.host?.lowercased() == "open.spotify.com" else { return }
+        let segments = target.pathComponents.filter { $0 != "/" }
+        guard segments.count >= 2, segments[0] == "album" else { return }
+        let albumID = segments[1]
+        guard albumID.range(of: "^[A-Za-z0-9]{22}$", options: .regularExpression) != nil,
+              let canonical = URL(string: "https://open.spotify.com/album/\(albumID)"),
+              let spotifyApp = URL(string: "spotify:album:\(albumID)") else { return }
+
+        // Opening spotify:album: directly uses Spotify if installed. If it is
+        // absent, use the HTTPS album page as the safe fallback.
+        UIApplication.shared.open(spotifyApp, options: [:]) { success in
+            if !success {
+                Task { @MainActor in
+                    UIApplication.shared.open(canonical)
+                }
+            }
         }
     }
 }
