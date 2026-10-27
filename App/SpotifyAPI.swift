@@ -241,6 +241,43 @@ final class SpotifyAPI: NSObject, ASWebAuthenticationPresentationContextProvidin
         return results
     }
 
+    // Album tracklist for selecting favorites in VINYL Reviews.
+    // Uses the same OAuth access token and refresh flow as saved albums.
+    func albumTracks(for album: VinylAlbum) async throws -> [ReviewTrack] {
+        guard album.id.range(of: "^[A-Za-z0-9]{22}$", options: .regularExpression) != nil else {
+            throw SpotifyFailure.badResponse("Не удалось определить Spotify ID альбома. Добавь треки вручную.")
+        }
+        var next: String? = "https://api.spotify.com/v1/albums/\(album.id)/tracks?limit=50"
+        var results: [ReviewTrack] = []
+        var seen = Set<String>()
+        var pageCount = 0
+        while let link = next, pageCount < 12 {
+            guard let url = URL(string: link),
+                  url.scheme == "https", url.host == "api.spotify.com",
+                  url.path == "/v1/albums/\(album.id)/tracks" else {
+                throw SpotifyFailure.badResponse("Spotify вернул недопустимую ссылку страницы треков.")
+            }
+            let json = try await getJSON(url)
+            guard let items = json["items"] as? [Any] else {
+                throw SpotifyFailure.badResponse("Spotify вернул треклист без массива items.")
+            }
+            for entry in items {
+                guard let item = entry as? [String: Any],
+                      let name = item["name"] as? String, !name.isEmpty else { continue }
+                let disc = max(1, item["disc_number"] as? Int ?? 1)
+                let number = max(1, item["track_number"] as? Int ?? results.count + 1)
+                let id = (item["id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "album:\(album.id):\(disc):\(number)"
+                if seen.insert(id).inserted {
+                    results.append(ReviewTrack(id: id, name: name, discNumber: disc, trackNumber: number))
+                }
+            }
+            next = json["next"] as? String
+            pageCount += 1
+        }
+        return results
+    }
+
     private static func randomBytes(count: Int) -> Data {
         var bytes = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
