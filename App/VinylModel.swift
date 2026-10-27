@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import WidgetKit
 
 enum CollectionMode: String, CaseIterable, Identifiable {
     case saved = "Моя библиотека"
@@ -17,6 +18,9 @@ final class VinylModel: ObservableObject {
     @Published var selectedID: String = ""
     @Published var mode: CollectionMode = .saved
     @Published var ratings: [String: Int] = [:]
+    @Published var ratedSnapshots: [String: VinylAlbum] = [:]
+    @Published var widgetGistID: String = GistWidgetSync.shared.gistID
+    @Published var widgetBusy = false
     @Published var isLoading = false
     @Published var message: String?
     @Published var accent: RGBColor = CoverPalette.fallback
@@ -32,12 +36,27 @@ final class VinylModel: ObservableObject {
         }
     }
     var current: VinylAlbum? { pool.first(where: { $0.id == selectedID }) ?? pool.first }
+    var allAlbums: [VinylAlbum] {
+        var visited = Set<String>()
+        return (saved + manual + recent).filter { visited.insert($0.id).inserted }
+    }
+    var ratedAlbums: [VinylAlbum] {
+        var lookup = ratedSnapshots
+        for album in allAlbums { lookup[album.id] = album }
+        return ratings.filter { $0.value > 0 }
+            .compactMap { lookup[$0.key] }
+            .sorted {
+                let lhs = ratings[$0.id] ?? 0, rhs = ratings[$1.id] ?? 0
+                return lhs == rhs ? $0.name.localizedStandardCompare($1.name) == .orderedAscending : lhs > rhs
+            }
+    }
 
     init() {
         saved = read([VinylAlbum].self, key: "vinyl.saved") ?? []
         recent = read([VinylAlbum].self, key: "vinyl.recent") ?? []
         manual = read([VinylAlbum].self, key: "vinyl.manual") ?? []
         ratings = read([String: Int].self, key: "vinyl.ratings") ?? [:]
+        ratedSnapshots = read([String: VinylAlbum].self, key: "vinyl.rated.snapshots") ?? [:]
         mode = CollectionMode(rawValue: defaults.string(forKey: "vinyl.mode") ?? "") ?? .saved
         selectedID = defaults.string(forKey: "vinyl.selected") ?? ""
         selectDailyIfNeeded()
@@ -80,10 +99,54 @@ final class VinylModel: ObservableObject {
         if let pick = (options.isEmpty ? pool : options).randomElement() { select(pick) }
     }
     func rate(_ value: Int, album: VinylAlbum) {
-        if value == 0 { ratings.removeValue(forKey: album.id) }
-        else { ratings[album.id] = value }
+        if value == 0 {
+            ratings.removeValue(forKey: album.id)
+            ratedSnapshots.removeValue(forKey: album.id)
+        } else {
+            ratings[album.id] = min(10, max(1, value))
+            ratedSnapshots[album.id] = album
+        }
         store(ratings, key: "vinyl.ratings")
+        store(ratedSnapshots, key: "vinyl.rated.snapshots")
     }
+
+    func saveGitHubToken(_ value: String) {
+        do {
+            try GistWidgetSync.shared.setToken(value)
+            message = "GitHub-токен сохранён в Keychain. Теперь выбери альбом и нажми «Добавить в виджет»."
+        } catch { message = error.localizedDescription }
+    }
+
+    @discardableResult
+    func publishToWidget(_ album: VinylAlbum) async -> Bool {
+        guard !widgetBusy else { return false }
+        widgetBusy = true
+        defer { widgetBusy = false }
+        do {
+            let id = try await GistWidgetSync.shared.publish(album: album)
+            widgetGistID = id
+            message = "«\(album.name)» отправлен в виджет. Если ещё не настроил виджет, скопируй Gist ID в Настройки → Виджет и укажи его в настройках виджета на домашнем экране."
+            // Requesting an update is safe, but iOS decides when to draw it.
+            WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
+            return true
+        } catch {
+            message = "Виджет: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func nextWidgetAlbum() async {
+        let candidates = allAlbums.filter { $0.id != (UserDefaults.standard.string(forKey: "vinyl.widget.lastAlbumID") ?? "") }
+        let chosen = (candidates.isEmpty ? allAlbums : candidates).randomElement()
+        guard let album = chosen else {
+            message = "Сначала синхронизируй Spotify или добавь альбом по ссылке."
+            return
+        }
+        if await publishToWidget(album) {
+            UserDefaults.standard.set(album.id, forKey: "vinyl.widget.lastAlbumID")
+        }
+    }
+
     func addManual(spotifyLink: String, title: String, artist: String, year: String) async {
         guard let incoming = URL(string: spotifyLink.trimmingCharacters(in: .whitespacesAndNewlines)),
               incoming.host == "open.spotify.com",
