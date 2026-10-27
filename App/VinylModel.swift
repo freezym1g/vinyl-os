@@ -18,6 +18,9 @@ final class VinylModel: ObservableObject {
     @Published var mode: CollectionMode = .saved
     @Published var ratings: [String: Int] = [:]
     @Published var ratedSnapshots: [String: VinylAlbum] = [:]
+    // Local listen-later shelf, independent of Spotify and the native widget.
+    @Published private(set) var wishlistDates: [String: Date] = [:]
+    @Published private(set) var wishlistSnapshots: [String: VinylAlbum] = [:]
     // Rich reviews are stored separately: existing 1–10 ratings remain compatible.
     @Published private(set) var reviews: [String: AlbumReview] = [:]
     @Published var widgetGistID: String = GistWidgetSync.shared.gistID
@@ -43,6 +46,25 @@ final class VinylModel: ObservableObject {
         var visited = Set<String>()
         return (saved + manual + recent).filter { visited.insert($0.id).inserted }
     }
+    var wishlistedAlbums: [VinylAlbum] {
+        var lookup = wishlistSnapshots
+        for album in allAlbums { lookup[album.id] = album }
+        return wishlistDates.keys.compactMap { lookup[$0] }
+            .sorted { (wishlistDates[$0.id] ?? .distantPast) > (wishlistDates[$1.id] ?? .distantPast) }
+    }
+    func isWishlisted(_ album: VinylAlbum) -> Bool { wishlistDates[album.id] != nil }
+    func toggleWishlist(_ album: VinylAlbum) {
+        if isWishlisted(album) {
+            wishlistDates.removeValue(forKey: album.id)
+            wishlistSnapshots.removeValue(forKey: album.id)
+        } else {
+            wishlistDates[album.id] = Date()
+            wishlistSnapshots[album.id] = album
+        }
+        store(wishlistDates, key: "vinyl.wishlist.dates.v1")
+        store(wishlistSnapshots, key: "vinyl.wishlist.albums.v1")
+    }
+
     var ratedAlbums: [VinylAlbum] {
         var lookup = ratedSnapshots
         for album in allAlbums { lookup[album.id] = album }
@@ -60,6 +82,8 @@ final class VinylModel: ObservableObject {
         manual = read([VinylAlbum].self, key: "vinyl.manual") ?? []
         ratings = read([String: Int].self, key: "vinyl.ratings") ?? [:]
         ratedSnapshots = read([String: VinylAlbum].self, key: "vinyl.rated.snapshots") ?? [:]
+        wishlistDates = read([String: Date].self, key: "vinyl.wishlist.dates.v1") ?? [:]
+        wishlistSnapshots = read([String: VinylAlbum].self, key: "vinyl.wishlist.albums.v1") ?? [:]
         reviews = read([String: AlbumReview].self, key: "vinyl.album.reviews.v1") ?? [:]
         // Reviews from previous updates don't override newer legacy scores.
         for (id, review) in reviews where ratings[id] == nil {
@@ -173,6 +197,8 @@ final class VinylModel: ObservableObject {
         reviews[album.id] = review
         ratings[album.id] = score
         ratedSnapshots[album.id] = album
+        // An album moves out of the listening queue when it gets a review.
+        if isWishlisted(album) { toggleWishlist(album) }
         store(reviews, key: "vinyl.album.reviews.v1")
         store(ratings, key: "vinyl.ratings")
         store(ratedSnapshots, key: "vinyl.rated.snapshots")
@@ -192,6 +218,68 @@ final class VinylModel: ObservableObject {
         if value == 0 { deleteReview(for: album) }
         else { saveReview(score: min(10, max(1, value)), bestTracks: review(for: album)?.bestTracks ?? [],
                           comment: review(for: album)?.comment ?? "", for: album) }
+    }
+
+    // Export/import are deliberately scoped to music data. Credentials stay
+    // in Keychain and are never encoded into the JSON archive.
+    func exportBackupData() throws -> Data {
+        let archive = VinylBackupPayload(
+            version: 1, exportedAt: Date(), saved: saved, recent: recent,
+            manual: manual, ratings: ratings, ratedSnapshots: ratedSnapshots,
+            reviews: reviews, wishlistDates: wishlistDates,
+            wishlistSnapshots: wishlistSnapshots)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(archive)
+    }
+
+    func inspectBackup(_ data: Data) throws -> VinylBackupPayload {
+        guard data.count <= 20_000_000 else { throw VinylBackupError.tooLarge }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let archive = try decoder.decode(VinylBackupPayload.self, from: data)
+        guard archive.version == 1 else { throw VinylBackupError.unsupportedVersion }
+        guard archive.saved.count < 100_000, archive.recent.count < 100_000,
+              archive.manual.count < 100_000, archive.ratings.count < 100_000,
+              archive.reviews.count < 100_000, archive.wishlistDates.count < 100_000 else {
+            throw VinylBackupError.tooLarge
+        }
+        return archive
+    }
+
+    func restoreBackup(_ archive: VinylBackupPayload, replace: Bool) {
+        func combining(_ old: [VinylAlbum], _ incoming: [VinylAlbum]) -> [VinylAlbum] {
+            var ids = Set<String>()
+            return (old + incoming).filter { ids.insert($0.id).inserted }
+        }
+        func merging<T>(_ current: [String: T], _ imported: [String: T]) -> [String: T] {
+            // Keep the user's on-device entry when both sides contain the ID.
+            imported.merging(current) { _, local in local }
+        }
+        saved = replace ? archive.saved : combining(saved, archive.saved)
+        recent = replace ? archive.recent : combining(recent, archive.recent)
+        manual = replace ? archive.manual : combining(manual, archive.manual)
+        reviews = replace ? archive.reviews : merging(reviews, archive.reviews)
+        ratings = replace ? archive.ratings : merging(ratings, archive.ratings)
+        ratedSnapshots = replace ? archive.ratedSnapshots : merging(ratedSnapshots, archive.ratedSnapshots)
+        wishlistDates = replace ? archive.wishlistDates : merging(wishlistDates, archive.wishlistDates)
+        wishlistSnapshots = replace ? archive.wishlistSnapshots : merging(wishlistSnapshots, archive.wishlistSnapshots)
+        ratings = ratings.filter { (1...10).contains($0.value) }
+        for (id, review) in reviews { ratings[id] = review.score }
+        // A reviewed record does not also belong to the listen-later queue.
+        for id in ratings.keys { wishlistDates.removeValue(forKey: id); wishlistSnapshots.removeValue(forKey: id) }
+        store(saved, key: "vinyl.saved")
+        store(recent, key: "vinyl.recent")
+        store(manual, key: "vinyl.manual")
+        store(reviews, key: "vinyl.album.reviews.v1")
+        store(ratings, key: "vinyl.ratings")
+        store(ratedSnapshots, key: "vinyl.rated.snapshots")
+        store(wishlistDates, key: "vinyl.wishlist.dates.v1")
+        store(wishlistSnapshots, key: "vinyl.wishlist.albums.v1")
+        restoreValidSelection()
+        Task { await updateAccent() }
+        message = replace ? "Резервная копия восстановлена. Данные VINYL заменены." : "Резервная копия объединена с данными VINYL. Твои текущие рецензии сохранены."
     }
 
     func saveGitHubToken(_ value: String) {
