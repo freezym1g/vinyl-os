@@ -3,34 +3,50 @@ import WidgetKit
 import AppIntents
 import UIKit
 
-private enum WidgetSelection {
-    static let indexKey = "vinyl.widget.manualIndex"
-    static let dayKey = "vinyl.widget.manualDay"
-    static func day() -> String {
-        let parts = Calendar.current.dateComponents([.year, .month, .day], from: Date())
-        return "\(parts.year ?? 0)-\(parts.month ?? 0)-\(parts.day ?? 0)"
+// Each widget can be configured with the Gist ID shown in VINYL settings.
+// App Groups are intentionally NOT used: this works with free sideload signing.
+struct VinylWidgetConfiguration: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource = "VINYL — выбранный альбом"
+    static var description = IntentDescription("Вставь Gist ID из VINYL → Настройки → Виджет")
+
+    @Parameter(title: "Gist ID")
+    var gistID: String
+
+    init() { gistID = "" }
+}
+
+private enum WidgetFallback {
+    private static let indexKey = "vinyl.widget.manualIndex"
+    private static let dayKey = "vinyl.widget.manualDay"
+
+    private static func day() -> String {
+        let d = Calendar.current.dateComponents([.year, .month, .day], from: .now)
+        return "\(d.year ?? 0)-\(d.month ?? 0)-\(d.day ?? 0)"
     }
     static func index() -> Int {
-        let defaults = UserDefaults.standard
+        let count = PresetRecords.all.count
+        let defaults = UserDefaults.standard // Widget extension's own sandbox.
         if defaults.string(forKey: dayKey) == day() {
-            return (defaults.integer(forKey: indexKey) % PresetRecords.all.count + PresetRecords.all.count) % PresetRecords.all.count
+            return (defaults.integer(forKey: indexKey) % count + count) % count
         }
-        let ordinal = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
-        return ordinal % PresetRecords.all.count
+        let ordinal = Calendar.current.ordinality(of: .day, in: .era, for: .now) ?? 0
+        return ordinal % count
     }
     static func next() {
-        let defaults = UserDefaults.standard
-        defaults.set((index() + 1) % PresetRecords.all.count, forKey: indexKey)
-        defaults.set(day(), forKey: dayKey)
+        UserDefaults.standard.set((index() + 1) % PresetRecords.all.count, forKey: indexKey)
+        UserDefaults.standard.set(day(), forKey: dayKey)
+    }
+    static var current: VinylAlbum {
+        let item = PresetRecords.all[index()]
+        return VinylAlbum(id: item.id, name: item.title, artist: item.artist,
+                          year: item.year, artURL: "", spotifyURL: item.link.absoluteString)
     }
 }
 
-struct NextRecordIntent: AppIntent {
+struct NextLocalRecordIntent: AppIntent {
     static var title: LocalizedStringResource = "Следующий альбом"
-    static var description = IntentDescription("Переключить альбом во встроенной подборке виджета")
-
     func perform() async throws -> some IntentResult {
-        WidgetSelection.next()
+        WidgetFallback.next()
         WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
         return .result()
     }
@@ -38,109 +54,193 @@ struct NextRecordIntent: AppIntent {
 
 struct VinylEntry: TimelineEntry {
     let date: Date
-    let record: PresetRecord
+    let album: VinylAlbum
     let imageData: Data?
     let background: RGBColor
+    let synced: Bool
 }
 
-struct VinylProvider: TimelineProvider {
-    func placeholder(in context: Context) -> VinylEntry {
-        VinylEntry(date: .now, record: PresetRecords.all[0], imageData: nil,
-                   background: CoverPalette.fallback)
+struct VinylProvider: AppIntentTimelineProvider {
+    func placeholder(in context: Context) -> VinylEntry { placeholderEntry() }
+
+    func snapshot(for configuration: VinylWidgetConfiguration, in context: Context) async -> VinylEntry {
+        await loadEntry(gistID: configuration.gistID, preview: context.isPreview)
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (VinylEntry) -> Void) {
-        completion(placeholder(in: context))
+    func timeline(for configuration: VinylWidgetConfiguration, in context: Context) async -> Timeline<VinylEntry> {
+        let entry = await loadEntry(gistID: configuration.gistID, preview: false)
+        // iOS may defer reload; this is a request, not an exact schedule.
+        let refresh = Date().addingTimeInterval(15 * 60)
+        return Timeline(entries: [entry], policy: .after(refresh))
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<VinylEntry>) -> Void) {
-        Task {
-            let record = PresetRecords.all[WidgetSelection.index()]
-            let data = await fetchCover(for: record)
-            let background = CoverPalette.from(data.flatMap(UIImage.init(data:)))
-            let entry = VinylEntry(date: .now, record: record, imageData: data, background: background)
-            let nextDate = Calendar.current.nextDate(after: Date(), matching: DateComponents(hour: 0, minute: 1), matchingPolicy: .nextTime)
-                ?? Date().addingTimeInterval(24 * 3600)
-            completion(Timeline(entries: [entry], policy: .after(nextDate)))
+    private func placeholderEntry() -> VinylEntry {
+        VinylEntry(date: .now, album: WidgetFallback.current, imageData: nil,
+                   background: CoverPalette.fallback, synced: false)
+    }
+
+    private func loadEntry(gistID: String, preview: Bool) async -> VinylEntry {
+        if preview { return placeholderEntry() }
+        let id = gistID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isValid = id.range(of: "^[0-9a-fA-F]{10,64}$", options: .regularExpression) != nil
+        let album: VinylAlbum
+        let synced: Bool
+        if isValid {
+            let downloaded = await readGist(id)
+            if let downloaded {
+                album = downloaded
+                cacheAlbum(downloaded, gistID: id)
+                synced = true
+            } else if let cached = cachedAlbum(gistID: id) {
+                album = cached
+                synced = true
+            } else {
+                album = WidgetFallback.current
+                synced = false
+            }
+        } else {
+            album = WidgetFallback.current
+            synced = false
         }
+        let artwork = await artworkData(for: album)
+        return VinylEntry(date: .now, album: album, imageData: artwork,
+                          background: CoverPalette.from(artwork.flatMap(UIImage.init(data:))), synced: synced)
     }
 
-    private func fetchCover(for record: PresetRecord) async -> Data? {
-        struct Embed: Decodable { let thumbnail_url: String? }
-        var components = URLComponents(string: "https://open.spotify.com/oembed")!
-        components.queryItems = [URLQueryItem(name: "url", value: record.link.absoluteString)]
-        guard let url = components.url,
-              let (json, _) = try? await URLSession.shared.data(from: url),
-              let embed = try? JSONDecoder().decode(Embed.self, from: json),
-              let str = embed.thumbnail_url, let coverURL = URL(string: str),
-              let (data, _) = try? await URLSession.shared.data(from: coverURL) else {
-            return nil
+    private func readGist(_ id: String) async -> VinylAlbum? {
+        guard let url = URL(string: "https://api.github.com/gists/\(id)") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("VINYL-iOS-widget", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let files = json["files"] as? [String: Any],
+              let file = files["vinyl-widget.json"] as? [String: Any],
+              let content = file["content"] as? String,
+              let body = content.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(WidgetPayload.self, from: body),
+              payload.version == 1 else { return nil }
+        return payload.album
+    }
+
+    private func cacheAlbum(_ album: VinylAlbum, gistID: String) {
+        guard let data = try? JSONEncoder().encode(album) else { return }
+        UserDefaults.standard.set(data, forKey: "vinyl.gist.cached.\(gistID)")
+    }
+
+    private func cachedAlbum(gistID: String) -> VinylAlbum? {
+        guard let data = UserDefaults.standard.data(forKey: "vinyl.gist.cached.\(gistID)") else { return nil }
+        return try? JSONDecoder().decode(VinylAlbum.self, from: data)
+    }
+
+    private func artworkData(for album: VinylAlbum) async -> Data? {
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let safeID = album.id.filter { $0.isASCII && $0.isLetter || $0.isNumber }
+        let file = directory.appendingPathComponent("vinyl_\(safeID).jpg")
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+           let date = attributes[.modificationDate] as? Date,
+           Date().timeIntervalSince(date) < 7 * 24 * 3600,
+           let data = try? Data(contentsOf: file) { return data }
+
+        var url = album.artwork
+        if url == nil || album.artURL.isEmpty {
+            struct Embed: Decodable { let thumbnail_url: String? }
+            var components = URLComponents(string: "https://open.spotify.com/oembed")!
+            components.queryItems = [URLQueryItem(name: "url", value: album.spotifyURL)]
+            if let requestURL = components.url,
+               let (data, _) = try? await URLSession.shared.data(from: requestURL),
+               let embed = try? JSONDecoder().decode(Embed.self, from: data),
+               let str = embed.thumbnail_url { url = URL(string: str) }
         }
+        guard let url, let (data, response) = try? await URLSession.shared.data(from: url),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              UIImage(data: data) != nil else { return try? Data(contentsOf: file) }
+        try? data.write(to: file, options: .atomic)
         return data
     }
 }
 
 struct VinylWidgetView: View {
     let entry: VinylEntry
+
     var body: some View {
         HStack(spacing: 14) {
             Group {
-                if let data = entry.imageData, let picture = UIImage(data: data) {
-                    Image(uiImage: picture).resizable().scaledToFit()
+                if let data = entry.imageData, let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().scaledToFill()
                 } else {
                     ZStack {
-                        Color.white.opacity(0.12)
-                        Image(systemName: "opticaldisc").font(.system(size: 36)).foregroundStyle(.white.opacity(0.7))
+                        Color.white.opacity(0.1)
+                        Image(systemName: "opticaldisc").font(.system(size: 38))
                     }
                 }
             }
             .frame(width: 115, height: 115)
             .clipShape(RoundedRectangle(cornerRadius: 13))
-            VStack(alignment: .leading, spacing: 7) {
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text("TODAY’S RECORD")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .tracking(0.7)
                     .foregroundStyle(.white.opacity(0.8))
                 Spacer(minLength: 0)
-                Text(entry.record.title)
-                    .font(.system(size: 23, weight: .bold, design: .rounded))
+                Text(entry.album.name)
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
                     .lineLimit(2).minimumScaleFactor(0.67)
-                Text(entry.record.artist)
+                Text(entry.album.artist)
                     .font(.system(size: 14)).lineLimit(1).minimumScaleFactor(0.75)
-                Text(entry.record.year)
+                Text(entry.album.year)
                     .font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
                 Spacer(minLength: 0)
                 HStack(spacing: 4) {
-                    Link(destination: entry.record.link) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "play.fill")
-                            Text("OPEN IN SPOTIFY")
-                        }.font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                    if let spotify = entry.album.link {
+                        Link(destination: spotify) {
+                            Label("OPEN IN SPOTIFY", systemImage: "play.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
                     }
                     Spacer(minLength: 0)
-                    Button(intent: NextRecordIntent()) {
-                        Image(systemName: "shuffle").font(.system(size: 15, weight: .bold))
-                            .frame(width: 27, height: 26)
+                    if entry.synced {
+                        // Launches the containing app, which publishes the next album.
+                        // This is essential because free signing has no App Groups.
+                        Link(destination: URL(string: "vinyl-of-day://shuffle-widget")!) {
+                            Image(systemName: "shuffle")
+                                .font(.system(size: 15, weight: .bold))
+                                .frame(width: 28, height: 28)
+                        }
+                        .accessibilityLabel("Следующий альбом через VINYL")
+                    } else {
+                        Button(intent: NextLocalRecordIntent()) {
+                            Image(systemName: "shuffle")
+                                .font(.system(size: 15, weight: .bold))
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Следующий альбом")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Следующий альбом")
                 }
             }
             .foregroundStyle(.white)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 15)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .containerBackground(entry.background.swiftUIColor, for: .widget)
     }
 }
 
 struct VinylMediumWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "VinylMediumWidget", provider: VinylProvider()) { entry in
+        AppIntentConfiguration(kind: "VinylMediumWidget", intent: VinylWidgetConfiguration.self, provider: VinylProvider()) { entry in
             VinylWidgetView(entry: entry)
         }
         .configurationDisplayName("VINYL OF THE DAY")
-        .description("Альбом дня с переходом в Spotify и кнопкой переключения")
+        .description("Выбранный альбом из приложения VINYL — GitHub Gist ID в настройках виджета")
         .supportedFamilies([.systemMedium])
     }
 }
