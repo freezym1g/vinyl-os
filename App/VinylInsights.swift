@@ -15,6 +15,8 @@ struct VinylDiaryView: View {
     @EnvironmentObject private var model: VinylModel
     let albums: [VinylAlbum]
     let onSelect: (VinylAlbum) -> Void
+    let onEdit: (VinylAlbum) -> Void
+    let onDelete: (VinylAlbum) -> Void
 
     private var days: [DayBucket] {
         let dated = Dictionary(grouping: albums) { album -> Date? in
@@ -52,6 +54,15 @@ struct VinylDiaryView: View {
                         .buttonStyle(.plain)
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) { onDelete(album) } label: {
+                                Label("Удалить", systemImage: "trash")
+                            }
+                            Button { onEdit(album) } label: {
+                                Label("Изменить", systemImage: "pencil")
+                            }
+                            .tint(.indigo)
+                        }
                     }
                 }
             }
