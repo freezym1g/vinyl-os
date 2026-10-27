@@ -226,13 +226,13 @@ struct VinylWidgetView: View {
                 Text(entry.album.year)
                     .font(.system(size: 13)).foregroundStyle(.white.opacity(0.8))
                 Spacer(minLength: 0)
-                HStack(spacing: 4) {
+                HStack(spacing: 3) {
                     if let action = SpotifyWidgetAction.link(for: entry.album) {
                         Link(destination: action) {
                             Label("OPEN IN SPOTIFY", systemImage: "play.fill")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
                                 .lineLimit(1)
-                                .minimumScaleFactor(0.7)
+                                .minimumScaleFactor(0.82)
                                 .padding(.vertical, 6)
                                 .contentShape(Rectangle())
                         }
@@ -244,14 +244,14 @@ struct VinylWidgetView: View {
                         Link(destination: URL(string: "vinyl-of-day://shuffle-widget")!) {
                             Image(systemName: "shuffle")
                                 .font(.system(size: 15, weight: .bold))
-                                .frame(width: 28, height: 28)
+                                .frame(width: 25, height: 28)
                         }
                         .accessibilityLabel("Следующий альбом через VINYL")
                     } else {
                         Button(intent: NextLocalRecordIntent()) {
                             Image(systemName: "shuffle")
                                 .font(.system(size: 15, weight: .bold))
-                                .frame(width: 28, height: 28)
+                                .frame(width: 25, height: 28)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Следующий альбом")
