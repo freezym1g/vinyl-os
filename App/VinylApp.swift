@@ -9,6 +9,11 @@ struct VinylOfTheDayApp: App {
             MainTabs()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
+                .onOpenURL { url in
+                    if url.scheme == "vinyl-of-day" && url.host == "shuffle-widget" {
+                        Task { await model.nextWidgetAlbum() }
+                    }
+                }
         }
     }
 }
@@ -19,6 +24,7 @@ struct MainTabs: View {
         TabView {
             TodayView().tabItem { Label("Сегодня", systemImage: "square.stack") }
             LibraryView().tabItem { Label("Коллекция", systemImage: "square.grid.2x2") }
+            RatedAlbumsView().tabItem { Label("Оценённые", systemImage: "star.fill") }
             SettingsView().tabItem { Label("Настройки", systemImage: "gearshape") }
         }
         .tint(.white)
@@ -77,6 +83,14 @@ struct TodayView: View {
                                 }.buttonStyle(.borderedProminent).tint(.green)
                             }
                         }
+                        Button {
+                            Task { await model.publishToWidget(album) }
+                        } label: {
+                            Label(model.widgetBusy ? "Отправляем…" : "Добавить в виджет", systemImage: "plus.rectangle.on.rectangle")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.widgetBusy)
                         HStack {
                             Text("Моя оценка")
                             Spacer()
@@ -94,7 +108,7 @@ struct TodayView: View {
                     } else {
                         ContentUnavailableView("Нет альбомов", systemImage: "opticaldisc", description: Text("Подключи Spotify в настройках или добавь альбом по ссылке в «Коллекции»."))
                     }
-                    Text("Приложение синхронизирует Spotify. Виджет в этой бесплатной сборке пока использует отдельную подборку из четырёх альбомов.")
+                    Text("Для синхронизации с виджетом настрой GitHub Gist в «Настройки → Виджет». Бесплатная подпись не поддерживает общее хранилище приложения и виджета.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .padding(20)
@@ -122,58 +136,193 @@ struct VinylFeatureCard: View {
     }
 }
 
+/// A shared tappable album row used in Library and Rated Albums.
+struct AlbumListRow: View {
+    let album: VinylAlbum
+    let rating: Int?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            RemoteArtwork(url: album.artwork).frame(width: 60, height: 60)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(album.name).font(.headline).lineLimit(1)
+                Text(album.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(album.year).font(.caption2).foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 5)
+            if let rating {
+                Text("\(rating)/10")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(.white.opacity(0.11), in: Capsule())
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.footnote).foregroundStyle(.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
 struct LibraryView: View {
     @EnvironmentObject var model: VinylModel
     @State private var search = ""
     @State private var showAdd = false
-    @Environment(\.openURL) private var openURL
+    @State private var actionAlbum: VinylAlbum?
+
     private var filtered: [VinylAlbum] {
-        (model.saved + model.manual).reduce(into: [VinylAlbum]()) { output, album in
-            if !output.contains(where: { $0.id == album.id }) { output.append(album) }
-        }.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search) }
+        model.allAlbums.filter {
+            search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search)
+        }
     }
+
     var body: some View {
         NavigationStack {
             List {
                 ForEach(filtered) { album in
-                    HStack(spacing: 12) {
-                        RemoteArtwork(url: album.artwork).frame(width: 60, height: 60)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(album.name).font(.headline).lineLimit(1)
-                            Text(album.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text(album.year).font(.caption2).foregroundStyle(.tertiary)
-                        }
-                        Spacer(minLength: 4)
-                        Menu {
-                            Button("Показать сегодня") {
-                                model.setMode(model.manual.contains(where: { $0.id == album.id }) && !model.saved.contains(where: { $0.id == album.id }) ? .manual : .saved)
-                                model.select(album)
-                            }
-                            if let link = album.link { Button("Открыть Spotify") { openURL(link) } }
-                            ForEach(1...10, id: \.self) { value in
-                                Button("Оценка \(value)/10") { model.rate(value, album: album) }
-                            }
-                            if model.manual.contains(where: { $0.id == album.id }) {
-                                Button("Удалить из добавленных", role: .destructive) { model.removeManual(album) }
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle").font(.title2)
-                                .frame(minWidth: 44, minHeight: 44)
-                        }
-                    }.listRowBackground(Color.white.opacity(0.045))
+                    Button { actionAlbum = album } label: {
+                        AlbumListRow(album: album, rating: model.ratings[album.id])
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(Color.white.opacity(0.045))
                 }
             }
             .searchable(text: $search, prompt: "Альбом или исполнитель")
             .navigationTitle("Коллекция · \(filtered.count)")
             .toolbar { Button { showAdd = true } label: { Label("Добавить ссылку Spotify", systemImage: "plus") } }
             .sheet(isPresented: $showAdd) { AddSpotifyLinkView().environmentObject(model) }
-            .overlay { if model.saved.isEmpty && model.manual.isEmpty { ContentUnavailableView("Коллекция пуста", systemImage: "square.stack", description: Text("Добавь ссылку на альбом кнопкой + или подключи Spotify.")) } }
+            .sheet(item: $actionAlbum) { AlbumActionsSheet(album: $0).environmentObject(model) }
+            .overlay {
+                if model.allAlbums.isEmpty {
+                    ContentUnavailableView("Коллекция пуста", systemImage: "square.stack", description: Text("Добавь ссылку на альбом кнопкой + или подключи Spotify."))
+                }
+            }
         }
+    }
+}
+
+struct RatedAlbumsView: View {
+    @EnvironmentObject var model: VinylModel
+    @State private var actionAlbum: VinylAlbum?
+    @State private var search = ""
+
+    private var filtered: [VinylAlbum] {
+        model.ratedAlbums.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.artist.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(filtered) { album in
+                    Button { actionAlbum = album } label: {
+                        AlbumListRow(album: album, rating: model.ratings[album.id])
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(Color.white.opacity(0.045))
+                }
+            }
+            .searchable(text: $search, prompt: "Найти среди оценённых")
+            .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
+            .sheet(item: $actionAlbum) { AlbumActionsSheet(album: $0).environmentObject(model) }
+            .overlay {
+                if model.ratedAlbums.isEmpty {
+                    ContentUnavailableView("Пока нет оценок", systemImage: "star", description: Text("Открой альбом в «Коллекции» и поставь ему оценку от 1 до 10."))
+                }
+            }
+        }
+    }
+}
+
+struct AlbumActionsSheet: View {
+    let album: VinylAlbum
+    @EnvironmentObject var model: VinylModel
+    @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    RemoteArtwork(url: album.artwork)
+                        .frame(width: 185, height: 185)
+                    VStack(spacing: 5) {
+                        Text(album.name)
+                            .font(.title2.weight(.bold))
+                            .multilineTextAlignment(.center)
+                        Text(album.artist).foregroundStyle(.secondary)
+                        Text(album.year).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.bottom, 5)
+
+                    Button {
+                        Task {
+                            await model.publishToWidget(album)
+                            dismiss()
+                        }
+                    } label: {
+                        Label(model.widgetBusy ? "Отправляем в виджет…" : "Добавить в виджет", systemImage: "plus.rectangle.on.rectangle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white.opacity(0.21))
+                    .disabled(model.widgetBusy)
+
+                    if let spotify = album.link {
+                        Button {
+                            openURL(spotify)
+                        } label: {
+                            Label("Открыть в Spotify", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button {
+                        if model.saved.contains(where: { $0.id == album.id }) { model.setMode(.saved) }
+                        else if model.manual.contains(where: { $0.id == album.id }) { model.setMode(.manual) }
+                        else { model.setMode(.recent) }
+                        model.select(album)
+                        dismiss()
+                    } label: {
+                        Label("Показать на главном экране", systemImage: "square.stack")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Menu {
+                        ForEach(1...10, id: \.self) { rating in
+                            Button("\(rating) / 10") { model.rate(rating, album: album) }
+                        }
+                        if model.ratings[album.id] != nil {
+                            Button("Убрать оценку", role: .destructive) { model.rate(0, album: album) }
+                        }
+                    } label: {
+                        HStack {
+                            Label("Моя оценка", systemImage: "star")
+                            Spacer()
+                            Text(model.ratings[album.id].map { "\($0)/10" } ?? "Выбрать")
+                        }
+                        .padding(14)
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity)
+            }
+            .background(Color(red: 0.09, green: 0.09, blue: 0.085))
+            .navigationTitle("Альбом")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
+        }
+        .presentationDetents([.large])
     }
 }
 
 struct SettingsView: View {
     @EnvironmentObject var model: VinylModel
+    @State private var githubToken = ""
+    @State private var savedToken = false
+
     var body: some View {
         NavigationStack {
             Form {
@@ -196,13 +345,42 @@ struct SettingsView: View {
                         .disabled(!model.connected)
                     if model.isLoading { ProgressView() }
                 }
+                Section("Виджет · бесплатная синхронизация") {
+                    Text("Для работы без платного Apple Developer используем unlisted Gist на GitHub. Туда отправляется только выбранный альбом: название, исполнитель, год, ссылка и обложка. Вся библиотека, оценки и Spotify-токены остаются на iPhone.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Link("Создать GitHub Gist-токен", destination: URL(string: "https://github.com/settings/tokens/new")!)
+                    Text("Создай Personal access token (classic), отметь только разрешение «gist». Никому не отправляй этот токен и не загружай его в репозиторий.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    SecureField("GitHub-токен (ghp_…)", text: $githubToken)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Сохранить GitHub-токен") {
+                        model.saveGitHubToken(githubToken)
+                        savedToken = GistWidgetSync.shared.hasToken
+                        githubToken = ""
+                    }
+                    .disabled(githubToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    LabeledContent("Токен", value: savedToken ? "Сохранён" : "Не настроен")
+                    if !model.widgetGistID.isEmpty {
+                        Text("Gist ID: \(model.widgetGistID)")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                        Button("Скопировать Gist ID") {
+                            UIPasteboard.general.string = model.widgetGistID
+                        }
+                    }
+                    Text("После первой кнопки «Добавить в виджет» зажми виджет VINYL на домашнем экране → «Изменить виджет» → вставь Gist ID. Без ID виджет показывает 4 демо-альбома.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("Gist не индексируется как публичный, но любой, кто получит ссылку, сможет увидеть выбранный альбом. Для обновления требуется интернет; iOS решает, когда перерисовать виджет.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("О приложении") {
-                    Text("VINYL 1.0 — бесплатная локальная сборка. Неофициальное приложение, не связано со Spotify AB.")
-                    Text("Оценки хранятся на iPhone. Токены Spotify хранятся в Keychain.")
-                    Text("Без платного Apple Developer виджет использует отдельные 4 альбома: Flower Boy, IGOR, Blonde и Scorpion.")
+                    Text("VINYL 1.1 — бесплатная локальная сборка. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
             .navigationTitle("Настройки")
+            .onAppear { savedToken = GistWidgetSync.shared.hasToken }
         }
     }
 }
