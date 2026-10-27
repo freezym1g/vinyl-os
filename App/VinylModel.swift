@@ -159,7 +159,9 @@ final class VinylModel: ObservableObject {
         } catch { errors.append("История: \(error.localizedDescription)") }
         selectDailyIfNeeded()
         await updateAccent()
-        message = errors.isEmpty ? "Синхронизация завершена. Сохранено: \(saved.count), недавно: \(recent.count)." : errors.joined(separator: "\n")
+        let skipped = SpotifyAPI.shared.skippedSaved + SpotifyAPI.shared.skippedRecent
+        let summary = "Синхронизация завершена. Сохранено: \(saved.count), недавно: \(recent.count)." + (skipped > 0 ? " Пропущено неполных записей: \(skipped)." : "")
+        message = errors.isEmpty ? summary : errors.joined(separator: "\n")
     }
     func updateAccent() async {
         guard let url = current?.artwork else { accent = CoverPalette.fallback; return }
