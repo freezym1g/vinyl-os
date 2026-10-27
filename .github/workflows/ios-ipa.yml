@@ -1,27 +1,23 @@
-
 name: Build unsigned iPhone IPA
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   build:
-    runs-on: macos-15-intel
-
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+      - name: Confirm Xcode 26 SDK
+        run: |
+          xcodebuild -version
+          xcodebuild -version | grep 'Xcode 26'
       - name: Install XcodeGen
         run: brew install xcodegen
-
       - name: Generate Xcode project
         run: xcodegen generate
-
-      - name: Build iOS app
+      - name: Build iOS device app without signing
         run: |
           set -o pipefail
           xcodebuild \
@@ -34,8 +30,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             build
-
-      - name: Create IPA
+      - name: Bundle unsigned IPA and verify native widget
         shell: bash
         run: |
           set -euo pipefail
@@ -45,10 +40,11 @@ jobs:
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry VINYL-unsigned.ipa Payload
-
-      - name: Upload IPA
+          unzip -l VINYL-unsigned.ipa | grep 'VinylWidget.appex/'
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: VINYL-unsigned-IPA
           path: VINYL-unsigned.ipa
           if-no-files-found: error
+          retention-days: 7
