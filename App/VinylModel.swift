@@ -23,7 +23,10 @@ final class VinylModel: ObservableObject {
     @Published private(set) var wishlistSnapshots: [String: VinylAlbum] = [:]
     // Rich reviews are stored separately: existing 1–10 ratings remain compatible.
     @Published private(set) var reviews: [String: AlbumReview] = [:]
+    // An ordered personal top four; separate from Spotify and album ratings.
+    @Published private(set) var profileFavoriteIDs: [String] = []
     @Published var widgetGistID: String = GistWidgetSync.shared.gistID
+    @Published private(set) var widgetLibrarySharingEnabled = UserDefaults.standard.bool(forKey: "vinyl.widget.shareLibrary.v2")
     @Published var widgetBusy = false
     @Published var isLoading = false
     @Published var message: String?
@@ -42,6 +45,15 @@ final class VinylModel: ObservableObject {
         }
     }
     var current: VinylAlbum? { pool.first(where: { $0.id == selectedID }) ?? pool.first }
+    // The FULL library: saved Spotify albums + manual links + recent listening.
+    // Duplicates removed while preserving stable order for the widget rotation.
+    var widgetAlbumPool: [VinylAlbum] {
+        // Saved Spotify collection + manually added albums. Recent listening
+        // history is deliberately NOT uploaded to the unlisted Gist.
+        var seen = Set<String>()
+        return (saved + manual).filter { seen.insert($0.id).inserted }
+    }
+
     var allAlbums: [VinylAlbum] {
         var visited = Set<String>()
         return (saved + manual + recent).filter { visited.insert($0.id).inserted }
@@ -65,6 +77,32 @@ final class VinylModel: ObservableObject {
         store(wishlistSnapshots, key: "vinyl.wishlist.albums.v1")
     }
 
+    var profileFavoriteAlbums: [VinylAlbum] {
+        var lookup = ratedSnapshots
+        for album in allAlbums { lookup[album.id] = album }
+        return profileFavoriteIDs.compactMap { lookup[$0] }
+    }
+    func addProfileFavorite(_ album: VinylAlbum) {
+        guard !profileFavoriteIDs.contains(album.id), profileFavoriteIDs.count < 4 else { return }
+        // Preserve a snapshot so an album can stay in the profile offline.
+        ratedSnapshots[album.id] = album
+        store(ratedSnapshots, key: "vinyl.rated.snapshots")
+        profileFavoriteIDs.append(album.id)
+        store(profileFavoriteIDs, key: "vinyl.profile.favorites.v1")
+    }
+    func removeProfileFavorite(_ album: VinylAlbum) {
+        profileFavoriteIDs.removeAll { $0 == album.id }
+        store(profileFavoriteIDs, key: "vinyl.profile.favorites.v1")
+    }
+    func moveProfileFavorite(from source: Int, to destination: Int) {
+        guard profileFavoriteIDs.indices.contains(source),
+              profileFavoriteIDs.indices.contains(destination), source != destination else { return }
+        let item = profileFavoriteIDs.remove(at: source)
+        profileFavoriteIDs.insert(item, at: destination)
+        store(profileFavoriteIDs, key: "vinyl.profile.favorites.v1")
+    }
+    var ratedTracksCount: Int { reviews.values.reduce(0) { $0 + $1.trackRatings.count } }
+
     var ratedAlbums: [VinylAlbum] {
         var lookup = ratedSnapshots
         for album in allAlbums { lookup[album.id] = album }
@@ -85,6 +123,9 @@ final class VinylModel: ObservableObject {
         wishlistDates = read([String: Date].self, key: "vinyl.wishlist.dates.v1") ?? [:]
         wishlistSnapshots = read([String: VinylAlbum].self, key: "vinyl.wishlist.albums.v1") ?? [:]
         reviews = read([String: AlbumReview].self, key: "vinyl.album.reviews.v1") ?? [:]
+        var profileSeen = Set<String>()
+        profileFavoriteIDs = Array((read([String].self, key: "vinyl.profile.favorites.v1") ?? [])
+            .filter { profileSeen.insert($0).inserted }.prefix(4))
         // Reviews from previous updates don't override newer legacy scores.
         for (id, review) in reviews where ratings[id] == nil {
             ratings[id] = review.score
@@ -185,15 +226,18 @@ final class VinylModel: ObservableObject {
         return AlbumReview(score: score, bestTracks: [], comment: "", ratedAt: nil, updatedAt: nil)
     }
 
-    func saveReview(score: Int, bestTracks: [ReviewTrack], comment: String, for album: VinylAlbum) {
+    func saveReview(score: Int, bestTracks: [ReviewTrack], comment: String,
+                    trackRatings: [TrackRating]? = nil, for album: VinylAlbum) {
         guard (1...10).contains(score) else { return }
         let now = Date()
         // Preserve original review date when editing; never pretend to know the
         // original date for 1.2.x ratings that did not store a timestamp.
         let firstDate = reviews[album.id]?.ratedAt ?? now
         let cleanComment = String(comment.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+        let validTrackRatings = (trackRatings ?? reviews[album.id]?.trackRatings ?? [])
+            .filter { (1...10).contains($0.score) }
         let review = AlbumReview(score: score, bestTracks: bestTracks, comment: cleanComment,
-                                 ratedAt: firstDate, updatedAt: now)
+                                 ratedAt: firstDate, updatedAt: now, trackRatings: validTrackRatings)
         reviews[album.id] = review
         ratings[album.id] = score
         ratedSnapshots[album.id] = album
@@ -207,7 +251,10 @@ final class VinylModel: ObservableObject {
     func deleteReview(for album: VinylAlbum) {
         reviews.removeValue(forKey: album.id)
         ratings.removeValue(forKey: album.id)
-        ratedSnapshots.removeValue(forKey: album.id)
+        // Keep a profile snapshot if this record is in the personal Top 4.
+        if !profileFavoriteIDs.contains(album.id) {
+            ratedSnapshots.removeValue(forKey: album.id)
+        }
         store(reviews, key: "vinyl.album.reviews.v1")
         store(ratings, key: "vinyl.ratings")
         store(ratedSnapshots, key: "vinyl.rated.snapshots")
@@ -227,7 +274,7 @@ final class VinylModel: ObservableObject {
             version: 1, exportedAt: Date(), saved: saved, recent: recent,
             manual: manual, ratings: ratings, ratedSnapshots: ratedSnapshots,
             reviews: reviews, wishlistDates: wishlistDates,
-            wishlistSnapshots: wishlistSnapshots)
+            wishlistSnapshots: wishlistSnapshots, profileFavoriteIDs: profileFavoriteIDs)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -265,6 +312,13 @@ final class VinylModel: ObservableObject {
         ratedSnapshots = replace ? archive.ratedSnapshots : merging(ratedSnapshots, archive.ratedSnapshots)
         wishlistDates = replace ? archive.wishlistDates : merging(wishlistDates, archive.wishlistDates)
         wishlistSnapshots = replace ? archive.wishlistSnapshots : merging(wishlistSnapshots, archive.wishlistSnapshots)
+        if replace {
+            profileFavoriteIDs = Array(archive.profileFavoriteIDs.prefix(4))
+        } else {
+            var seen = Set<String>()
+            profileFavoriteIDs = Array((profileFavoriteIDs + archive.profileFavoriteIDs)
+                .filter { seen.insert($0).inserted }.prefix(4))
+        }
         ratings = ratings.filter { (1...10).contains($0.value) }
         for (id, review) in reviews { ratings[id] = review.score }
         // A reviewed record does not also belong to the listen-later queue.
@@ -277,9 +331,11 @@ final class VinylModel: ObservableObject {
         store(ratedSnapshots, key: "vinyl.rated.snapshots")
         store(wishlistDates, key: "vinyl.wishlist.dates.v1")
         store(wishlistSnapshots, key: "vinyl.wishlist.albums.v1")
+        store(profileFavoriteIDs, key: "vinyl.profile.favorites.v1")
         restoreValidSelection()
         Task { await updateAccent() }
         message = replace ? "Резервная копия восстановлена. Данные VINYL заменены." : "Резервная копия объединена с данными VINYL. Твои текущие рецензии сохранены."
+        if widgetLibrarySharingEnabled { Task { await syncWidgetLibrary(silent: true) } }
     }
 
     func saveGitHubToken(_ value: String) {
@@ -289,16 +345,70 @@ final class VinylModel: ObservableObject {
         } catch { message = error.localizedDescription }
     }
 
+    /// User must explicitly consent: album titles and links become readable
+    /// by anyone who knows the unlisted Gist URL. No reviews or tokens upload.
+    func enableWidgetLibrarySharing() async {
+        guard !widgetLibrarySharingEnabled else { return }
+        guard !widgetAlbumPool.isEmpty else {
+            message = "Библиотека пустая. Сначала синхронизируй Spotify."
+            return
+        }
+        guard GistWidgetSync.shared.hasToken else {
+            message = "Сначала сохрани GitHub Gist-токен в Настройки → Виджет."
+            return
+        }
+        widgetBusy = true
+        defer { widgetBusy = false }
+        do {
+            let id = try await GistWidgetSync.shared.publishLibrary(widgetAlbumPool)
+            widgetLibrarySharingEnabled = true
+            defaults.set(true, forKey: "vinyl.widget.shareLibrary.v2")
+            widgetGistID = id
+            message = "В виджет передано \(widgetAlbumPool.count) альбомов. Теперь он будет случайно менять их по 3-часовым интервалам. Gist ID: \(id)"
+            WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
+        } catch { message = "Виджет: \(error.localizedDescription)" }
+    }
+
+    func disableWidgetLibrarySharing() async {
+        guard widgetLibrarySharingEnabled else { return }
+        widgetBusy = true
+        defer { widgetBusy = false }
+        do {
+            try await GistWidgetSync.shared.deletePublishedGist()
+            widgetLibrarySharingEnabled = false
+            defaults.set(false, forKey: "vinyl.widget.shareLibrary.v2")
+            widgetGistID = ""
+            WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
+            message = "Gist удалён. Удали старый виджет с домашнего экрана. При следующем подключении появится новый Gist ID."
+        } catch { message = "Не получилось очистить Gist: \(error.localizedDescription)" }
+    }
+
+    func syncWidgetLibrary(silent: Bool = false) async {
+        guard widgetLibrarySharingEnabled, GistWidgetSync.shared.hasToken else { return }
+        guard !widgetBusy, !widgetAlbumPool.isEmpty else { return }
+        widgetBusy = true
+        defer { widgetBusy = false }
+        do {
+            let id = try await GistWidgetSync.shared.publishLibrary(widgetAlbumPool)
+            widgetGistID = id
+            WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
+            if !silent { message = "Библиотека виджета обновлена: \(widgetAlbumPool.count) альбомов." }
+        } catch { message = "Обновление библиотеки виджета: \(error.localizedDescription)" }
+    }
+
     @discardableResult
     func publishToWidget(_ album: VinylAlbum) async -> Bool {
+        guard widgetLibrarySharingEnabled else {
+            message = "Открой Настройки → Виджет и разреши передачу библиотеки в Gist. Тогда будут доступны все альбомы и автосмена каждые 3 часа."
+            return false
+        }
         guard !widgetBusy else { return false }
         widgetBusy = true
         defer { widgetBusy = false }
         do {
-            let id = try await GistWidgetSync.shared.publish(album: album)
+            let id = try await GistWidgetSync.shared.publishManual(album: album, library: widgetAlbumPool)
             widgetGistID = id
-            message = "«\(album.name)» отправлен в виджет. Если ещё не настроил виджет, скопируй Gist ID в Настройки → Виджет и укажи его в настройках виджета на домашнем экране."
-            // Requesting an update is safe, but iOS decides when to draw it.
+            message = "«\(album.name)» добавлен в виджет до следующего 3-часового интервала."
             WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
             return true
         } catch {
@@ -308,14 +418,14 @@ final class VinylModel: ObservableObject {
     }
 
     func nextWidgetAlbum() async {
-        let candidates = allAlbums.filter { $0.id != (UserDefaults.standard.string(forKey: "vinyl.widget.lastAlbumID") ?? "") }
-        let chosen = (candidates.isEmpty ? allAlbums : candidates).randomElement()
+        let candidates = widgetAlbumPool.filter { $0.id != (defaults.string(forKey: "vinyl.widget.lastAlbumID") ?? "") }
+        let chosen = (candidates.isEmpty ? widgetAlbumPool : candidates).randomElement()
         guard let album = chosen else {
             message = "Сначала синхронизируй Spotify или добавь альбом по ссылке."
             return
         }
         if await publishToWidget(album) {
-            UserDefaults.standard.set(album.id, forKey: "vinyl.widget.lastAlbumID")
+            defaults.set(album.id, forKey: "vinyl.widget.lastAlbumID")
         }
     }
 
@@ -349,12 +459,14 @@ final class VinylModel: ObservableObject {
         setMode(.saved)
         select(record)
         message = "Альбом добавлен по ссылке."
+        if widgetLibrarySharingEnabled { await syncWidgetLibrary(silent: true) }
     }
 
     func removeManual(_ album: VinylAlbum) {
         manual.removeAll { $0.id == album.id }
         store(manual, key: "vinyl.manual")
         if selectedID == album.id { selectedID = ""; restoreValidSelection() }
+        if widgetLibrarySharingEnabled { Task { await syncWidgetLibrary(silent: true) } }
     }
 
     func setClientID() {
@@ -398,6 +510,9 @@ final class VinylModel: ObservableObject {
         let skipped = SpotifyAPI.shared.skippedSaved + SpotifyAPI.shared.skippedRecent
         let summary = "Синхронизация завершена. Сохранено: \(saved.count), недавно: \(recent.count)." + (skipped > 0 ? " Пропущено неполных записей: \(skipped)." : "")
         message = errors.isEmpty ? summary : errors.joined(separator: "\n")
+        if widgetLibrarySharingEnabled {
+            await syncWidgetLibrary(silent: true)
+        }
     }
     func updateAccent() async {
         guard let url = current?.artwork else { accent = CoverPalette.fallback; return }
