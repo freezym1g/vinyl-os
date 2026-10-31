@@ -13,23 +13,6 @@ struct VinylAlbum: Identifiable, Codable, Hashable {
     var link: URL? { URL(string: spotifyURL) }
 }
 
-struct PresetRecord: Identifiable {
-    let id: String
-    let title: String
-    let artist: String
-    let year: String
-    var link: URL { URL(string: "https://open.spotify.com/album/\(id)")! }
-}
-
-enum PresetRecords {
-    static let all: [PresetRecord] = [
-        .init(id: "2nkto6YNI4rUYTLqEwWJ3o", title: "Flower Boy", artist: "Tyler, The Creator", year: "2017"),
-        .init(id: "5zi7WsKlIiUXv09tbGLKsE", title: "IGOR", artist: "Tyler, The Creator", year: "2019"),
-        .init(id: "3mH6qwIy9crq0I9YQbOuDf", title: "Blonde", artist: "Frank Ocean", year: "2016"),
-        .init(id: "1ATL5GLyefJaxhQzSPVrLX", title: "Scorpion", artist: "Drake", year: "2018")
-    ]
-}
-
 struct RGBColor {
     let red: Double
     let green: Double
