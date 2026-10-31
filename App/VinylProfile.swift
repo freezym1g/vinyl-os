@@ -14,14 +14,22 @@ struct VinylProfileView: View {
         return String(format: "%.1f", Double(allScores.reduce(0, +)) / Double(allScores.count))
     }
     private var allTrackScores: [(VinylAlbum, TrackRating)] {
-        let sourceAlbums = model.ratedAlbums
-        return sourceAlbums.flatMap { album in
-            (model.review(for: album)?.trackRatings ?? []).map { (album, $0) }
-        }.sorted { lhs, rhs in
-            lhs.1.score == rhs.1.score
-                ? lhs.1.track.name.localizedStandardCompare(rhs.1.track.name) == .orderedAscending
-                : lhs.1.score > rhs.1.score
+        // Explicit loops keep the Swift compiler from exhaustively inferring
+        // the nested flatMap/map/sorted expression in Release builds.
+        var result: [(VinylAlbum, TrackRating)] = []
+        for album in model.ratedAlbums {
+            guard let review = model.review(for: album) else { continue }
+            for rating in review.trackRatings {
+                result.append((album, rating))
+            }
         }
+        result.sort { lhs, rhs in
+            if lhs.1.score != rhs.1.score {
+                return lhs.1.score > rhs.1.score
+            }
+            return lhs.1.track.name.localizedStandardCompare(rhs.1.track.name) == .orderedAscending
+        }
+        return result
     }
 
     var body: some View {
