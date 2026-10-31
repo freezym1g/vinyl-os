@@ -334,6 +334,7 @@ struct RatedAlbumsView: View {
     @State private var pendingDeletion: VinylAlbum?
     @State private var search = ""
     @State private var shelf: RatedShelf = .list
+    @State private var showProfile = false
 
     private var filtered: [VinylAlbum] {
         model.ratedAlbums.filter {
@@ -396,6 +397,18 @@ struct RatedAlbumsView: View {
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
             .navigationTitle("Оценённые · \(model.ratedAlbums.count)")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showProfile = true } label: {
+                        Image(systemName: "person.crop.circle")
+                            .font(.title3)
+                    }
+                    .accessibilityLabel("Мой музыкальный профиль")
+                }
+            }
+            .sheet(isPresented: $showProfile) {
+                VinylProfileView().environmentObject(model)
+            }
             .fullScreenCover(item: $destination) { target in
                 AlbumReviewFlowView(album: target.album, startInEditor: target.openEditor)
                     .environmentObject(model)
@@ -539,6 +552,7 @@ struct SettingsView: View {
     @State private var exportDocument: VinylBackupDocument?
     @State private var pendingBackup: VinylBackupPayload?
     @State private var confirmImport = false
+    @State private var confirmWidgetSharing = false
 
     var body: some View {
         NavigationStack {
@@ -563,7 +577,7 @@ struct SettingsView: View {
                     if model.isLoading { ProgressView() }
                 }
                 Section("Виджет · бесплатная синхронизация") {
-                    Text("Для работы без платного Apple Developer используем unlisted Gist на GitHub. Туда отправляется только выбранный альбом: название, исполнитель, год, ссылка и обложка. Вся библиотека, оценки и Spotify-токены остаются на iPhone.")
+                    Text("Для бесплатной подписи виджет использует GitHub Gist. Для смены каждые 3 часа нужно один раз разрешить публикацию списка альбомов (названия, исполнители, годы, ссылки и URL обложек). Данные доступны любому, у кого есть ссылка Gist. Оценки, комментарии и токены НЕ публикуются.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Link("Создать GitHub Gist-токен", destination: URL(string: "https://github.com/settings/tokens/new")!)
                     Text("Создай Personal access token (classic), отметь только разрешение «gist». Никому не отправляй этот токен и не загружай его в репозиторий.")
@@ -578,6 +592,23 @@ struct SettingsView: View {
                     }
                     .disabled(githubToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     LabeledContent("Токен", value: savedToken ? "Сохранён" : "Не настроен")
+                    LabeledContent("В библиотеке для виджета", value: String(model.widgetAlbumPool.count))
+                    LabeledContent("Автосмена", value: model.widgetLibrarySharingEnabled ? "Каждые 3 часа" : "Не настроена")
+                    Button(model.widgetLibrarySharingEnabled ? "Обновить библиотеку виджета" : "Включить автосмену из всей коллекции") {
+                        if model.widgetLibrarySharingEnabled {
+                            Task { await model.syncWidgetLibrary() }
+                        } else {
+                            confirmWidgetSharing = true
+                        }
+                    }
+                    .disabled(model.widgetBusy)
+                    if model.widgetLibrarySharingEnabled {
+                        Button("Удалить Gist и отключить синхронизацию", role: .destructive) {
+                            Task { await model.disableWidgetLibrarySharing() }
+                        }
+                        .disabled(model.widgetBusy)
+                    }
+                    if model.widgetBusy { ProgressView() }
                     if !model.widgetGistID.isEmpty {
                         Text("Gist ID: \(model.widgetGistID)")
                             .font(.caption.monospaced())
@@ -586,9 +617,9 @@ struct SettingsView: View {
                             UIPasteboard.general.string = model.widgetGistID
                         }
                     }
-                    Text("После первой кнопки «Добавить в виджет» зажми виджет VINYL на домашнем экране → «Изменить виджет» → вставь Gist ID. Без ID виджет показывает 4 демо-альбома.")
+                    Text("После включения автосмены зажми виджет на домашнем экране → «Изменить виджет» → вставь Gist ID. Без ID виджет покажет подсказку настройки, а не демо-альбомы.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("Gist не индексируется как публичный, но любой, кто получит ссылку, сможет увидеть выбранный альбом. Для обновления требуется интернет; iOS решает, когда перерисовать виджет.")
+                    Text("В 00:00, 03:00, 06:00 и далее виджет выбирает случайные альбомы из ВСЕЙ переданной коллекции. Ручной выбор действует только до ближайшего такого часа. Обновление коллекции требует подключения к интернету; iOS может задержать перерисовку.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Резервное копирование") {
@@ -602,13 +633,20 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("О приложении") {
-                    Text("VINYL 1.4.1 — Music Journal & Liquid Glass. Неофициальное приложение, не связано со Spotify AB.")
+                    Text("VINYL 1.5.1 — Music Profile & Widget Rotation. Неофициальное приложение, не связано со Spotify AB.")
                     Text("Оценки хранятся на iPhone. Spotify и GitHub токены — в Keychain.")
                 }
             }
             .scrollContentBackground(.hidden)
             .background(VinylBackdrop(accent: model.accent))
             .navigationTitle("Настройки")
+            .confirmationDialog("Передать названия альбомов в GitHub Gist?", isPresented: $confirmWidgetSharing) {
+                Button("Разрешить и включить автосмену") {
+                    Task { await model.enableWidgetLibrarySharing() }
+                }
+            } message: {
+                Text("Любой со ссылкой Gist сможет увидеть список альбомов, исполнителей и Spotify-ссылок. Оценки, комментарии и токены остаются на iPhone.")
+            }
             .onAppear { savedToken = GistWidgetSync.shared.hasToken }
             .fileExporter(isPresented: $exporting, document: exportDocument,
                           contentType: .json, defaultFilename: "VINYL-backup-1.4") { result in
