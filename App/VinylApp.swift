@@ -350,6 +350,53 @@ struct RatedAlbumsView: View {
         destination = RatedReviewDestination(album: album, openEditor: edit)
     }
 
+    // Keep the big SwiftUI view expression small enough for the Xcode type checker.
+    // This also prevents swipe-action closures from compounding the main view type.
+    @ViewBuilder
+    private var ratedShelfContent: some View {
+        switch shelf {
+        case .list:
+            ratedList
+        case .diary:
+            VinylDiaryView(albums: filtered,
+                           onSelect: { open($0) },
+                           onEdit: { open($0, edit: true) },
+                           onDelete: { pendingDeletion = $0 })
+        case .stats:
+            VinylStatisticsView()
+        }
+    }
+
+    private var ratedList: some View {
+        List {
+            ForEach(filtered) { album in
+                ratedRow(for: album)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+    }
+
+    private func ratedRow(for album: VinylAlbum) -> some View {
+        Button(action: { open(album) }) {
+            AlbumListRow(album: album,
+                         rating: model.ratings[album.id],
+                         reviewDate: model.review(for: album)?.ratedAt)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive, action: { pendingDeletion = album }) {
+                Label("Удалить", systemImage: "trash")
+            }
+            Button(action: { open(album, edit: true) }) {
+                Label("Изменить", systemImage: "pencil")
+            }
+            .tint(.indigo)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -361,38 +408,7 @@ struct RatedAlbumsView: View {
                 .padding(.top, 8)
                 .padding(.bottom, 8)
 
-                switch shelf {
-                case .list:
-                    List {
-                        ForEach(filtered) { album in
-                            Button { open(album) } label: {
-                                AlbumListRow(album: album, rating: model.ratings[album.id],
-                                             reviewDate: model.review(for: album)?.ratedAt)
-                            }
-                            .buttonStyle(.plain)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) { pendingDeletion = album } label: {
-                                    Label("Удалить", systemImage: "trash")
-                                }
-                                Button { open(album, edit: true) } label: {
-                                    Label("Изменить", systemImage: "pencil")
-                                }
-                                .tint(.indigo)
-                            }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                case .diary:
-                    VinylDiaryView(albums: filtered,
-                                   onSelect: { open($0) },
-                                   onEdit: { open($0, edit: true) },
-                                   onDelete: { pendingDeletion = $0 })
-                case .stats:
-                    VinylStatisticsView()
-                }
+                ratedShelfContent
             }
             .background(VinylBackdrop(accent: model.accent))
             .searchable(text: $search, prompt: "Найти среди оценённых")
