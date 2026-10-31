@@ -9,6 +9,14 @@ struct ReviewTrack: Identifiable, Codable, Hashable {
     let trackNumber: Int
 }
 
+// A rated song belongs to exactly one album review. The local track snapshot
+// allows showing the score even when the user is offline.
+struct TrackRating: Identifiable, Codable, Equatable {
+    let track: ReviewTrack
+    let score: Int
+    var id: String { track.id }
+}
+
 struct AlbumReview: Codable, Equatable {
     let score: Int
     let bestTracks: [ReviewTrack]
@@ -16,6 +24,34 @@ struct AlbumReview: Codable, Equatable {
     // nil only for ratings migrated from VINYL 1.2.x (which had no dates).
     let ratedAt: Date?
     let updatedAt: Date?
+    let trackRatings: [TrackRating]
+
+    init(score: Int, bestTracks: [ReviewTrack], comment: String,
+         ratedAt: Date?, updatedAt: Date?, trackRatings: [TrackRating] = []) {
+        self.score = score
+        self.bestTracks = bestTracks
+        self.comment = comment
+        self.ratedAt = ratedAt
+        self.updatedAt = updatedAt
+        self.trackRatings = trackRatings
+    }
+
+    // Older VINYL JSON/backup reviews do not contain trackRatings.
+    // Missing keys must decode as empty, not erase an entire album review.
+    private enum CodingKeys: String, CodingKey {
+        case score, bestTracks, comment, ratedAt, updatedAt, trackRatings
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        score = try c.decode(Int.self, forKey: .score)
+        bestTracks = try c.decodeIfPresent([ReviewTrack].self, forKey: .bestTracks) ?? []
+        comment = try c.decodeIfPresent(String.self, forKey: .comment) ?? ""
+        ratedAt = try c.decodeIfPresent(Date.self, forKey: .ratedAt)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
+        trackRatings = (try c.decodeIfPresent([TrackRating].self, forKey: .trackRatings) ?? [])
+            .filter { (1...10).contains($0.score) }
+    }
 }
 
 private enum ReviewDateLabel {
@@ -166,6 +202,39 @@ private struct AlbumReviewDetailView: View {
                 .padding(18)
                 .vinylGlassSurface(cornerRadius: 24)
 
+                if !review.trackRatings.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Оценки треков", systemImage: "music.note")
+                            .font(.headline)
+                        ForEach(review.trackRatings.sorted(by: { a, b in
+                            a.track.discNumber == b.track.discNumber
+                                ? a.track.trackNumber < b.track.trackNumber
+                                : a.track.discNumber < b.track.discNumber
+                        })) { rating in
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(rating.track.name)
+                                        .font(.subheadline.weight(.medium))
+                                    if rating.track.trackNumber > 0 {
+                                        Text("Трек \(rating.track.trackNumber)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer(minLength: 6)
+                                Text("\(rating.score)/10")
+                                    .font(.subheadline.weight(.bold).monospacedDigit())
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(.white.opacity(0.13), in: Capsule())
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
+                    .vinylGlassSurface(cornerRadius: 24)
+                }
+
                 VStack(alignment: .leading, spacing: 10) {
                     Label("Мой комментарий", systemImage: "text.alignleft")
                         .font(.headline)
@@ -221,6 +290,7 @@ private struct AlbumReviewEditorView: View {
     @State private var score = 0
     @State private var comment = ""
     @State private var choices = Set<String>()
+    @State private var scoresByTrack: [String: Int] = [:]
     @State private var tracklist: [ReviewTrack] = []
     @State private var customTracks: [ReviewTrack] = []
     @State private var customName = ""
@@ -234,6 +304,12 @@ private struct AlbumReviewEditorView: View {
     }
     private var selectedTracks: [ReviewTrack] {
         availableTracks.filter { choices.contains($0.id) }
+    }
+    private var ratedTracks: [TrackRating] {
+        availableTracks.compactMap { track in
+            guard let score = scoresByTrack[track.id], (1...10).contains(score) else { return nil }
+            return TrackRating(track: track, score: score)
+        }
     }
 
     var body: some View {
@@ -288,7 +364,7 @@ private struct AlbumReviewEditorView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    Text("Отметь треки, которые больше всего понравились.")
+                    Text("Звёздочка — любимый трек, меню справа — его оценка от 1 до 10.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     if loadingTracks {
@@ -305,25 +381,54 @@ private struct AlbumReviewEditorView: View {
                             .foregroundStyle(.secondary)
                     }
                     ForEach(availableTracks) { track in
-                        Button { toggle(track) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: choices.contains(track.id) ? "checkmark.circle.fill" : "circle")
-                                    .font(.title3)
-                                    .foregroundStyle(.white.opacity(choices.contains(track.id) ? 1 : 0.5))
+                        HStack(spacing: 9) {
+                            Button { toggle(track) } label: {
+                                Image(systemName: choices.contains(track.id) ? "star.fill" : "star")
+                                    .font(.system(size: 17))
+                                    .foregroundStyle(choices.contains(track.id) ? Color.yellow.opacity(0.9) : Color.white.opacity(0.45))
+                                    .frame(width: 34, height: 42)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(choices.contains(track.id) ? "Убрать из лучших" : "Добавить в лучшие")
+
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(track.name)
-                                    .font(.subheadline)
+                                    .font(.subheadline.weight(.medium))
                                     .multilineTextAlignment(.leading)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                if track.discNumber > 0 {
-                                    Text("\(track.trackNumber)")
-                                        .font(.caption.monospacedDigit())
+                                if track.trackNumber > 0 {
+                                    Text(track.discNumber > 1
+                                        ? "Диск \(track.discNumber) · Трек \(track.trackNumber)"
+                                        : "Трек \(track.trackNumber)")
+                                        .font(.caption2)
                                         .foregroundStyle(.tertiary)
                                 }
                             }
-                            .contentShape(Rectangle())
+                            Spacer(minLength: 2)
+                            Menu {
+                                Button("Без оценки") { scoresByTrack.removeValue(forKey: track.id) }
+                                Divider()
+                                ForEach(1...10, id: \.self) { value in
+                                    Button("\(value) / 10", systemImage: scoresByTrack[track.id] == value ? "checkmark" : "star") {
+                                        scoresByTrack[track.id] = value
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(scoresByTrack[track.id].map { "\($0)/10" } ?? "Оценить")
+                                        .font(.caption.weight(.semibold))
+                                        .monospacedDigit()
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 9)
+                                .background(Color.white.opacity(0.13), in: Capsule())
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 3)
                     }
                     HStack(spacing: 8) {
                         TextField("Вписать трек вручную", text: $customName)
@@ -361,7 +466,7 @@ private struct AlbumReviewEditorView: View {
 
                 Button {
                     model.saveReview(score: score, bestTracks: selectedTracks,
-                                     comment: comment, for: album)
+                                     comment: comment, trackRatings: ratedTracks, for: album)
                     onSaved()
                 } label: {
                     Label("Сохранить оценку", systemImage: "checkmark")
@@ -391,8 +496,9 @@ private struct AlbumReviewEditorView: View {
         if let old = model.review(for: album) {
             score = old.score
             comment = old.comment
-            customTracks = old.bestTracks
+            customTracks = old.bestTracks + old.trackRatings.map(\.track)
             choices = Set(old.bestTracks.map(\.id))
+            scoresByTrack = Dictionary(old.trackRatings.map { ($0.id, $0.score) }, uniquingKeysWith: { first, _ in first })
         }
     }
 
