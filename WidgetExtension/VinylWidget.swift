@@ -61,6 +61,17 @@ struct VinylProvider: AppIntentTimelineProvider {
         return Timeline(entries: entries, policy: .after(next))
     }
 
+    // The snapshot provider must construct a real entry as well as the timeline.
+    // VINYL 1.5.1 called createEntry(...) here, but never defined it, which
+    // prevented the widget extension from compiling in Xcode.
+    private func createEntry(for date: Date, payload: WidgetPayload?, seed: String) async -> VinylEntry {
+        let album = selectAlbum(from: payload, at: date, seed: seed)
+        let art = await artworkData(for: album)
+        let color = CoverPalette.from(art.flatMap { UIImage(data: $0) })
+        return VinylEntry(date: date, album: album, imageData: art,
+                          background: color, synced: payload?.library?.isEmpty == false)
+    }
+
     private func placeholderEntry() -> VinylEntry {
         VinylEntry(date: .now, album: setupAlbum, imageData: nil,
                    background: CoverPalette.fallback, synced: false)
