@@ -3,53 +3,11 @@ import WidgetKit
 import AppIntents
 import UIKit
 
-// Each widget can be configured with the Gist ID shown in VINYL settings.
-// App Groups are intentionally NOT used: this works with free sideload signing.
 struct VinylWidgetConfiguration: WidgetConfigurationIntent {
-    static var title: LocalizedStringResource = "VINYL — выбранный альбом"
-    static var description = IntentDescription("Вставь Gist ID из VINYL → Настройки → Виджет")
-
-    @Parameter(title: "Gist ID")
-    var gistID: String
-
+    static var title: LocalizedStringResource = "VINYL — альбом из коллекции"
+    static var description = IntentDescription("Добавь Gist ID из VINYL → Настройки → Виджет")
+    @Parameter(title: "Gist ID") var gistID: String
     init() { gistID = "" }
-}
-
-private enum WidgetFallback {
-    private static let indexKey = "vinyl.widget.manualIndex"
-    private static let dayKey = "vinyl.widget.manualDay"
-
-    private static func day() -> String {
-        let d = Calendar.current.dateComponents([.year, .month, .day], from: .now)
-        return "\(d.year ?? 0)-\(d.month ?? 0)-\(d.day ?? 0)"
-    }
-    static func index() -> Int {
-        let count = PresetRecords.all.count
-        let defaults = UserDefaults.standard // Widget extension's own sandbox.
-        if defaults.string(forKey: dayKey) == day() {
-            return (defaults.integer(forKey: indexKey) % count + count) % count
-        }
-        let ordinal = Calendar.current.ordinality(of: .day, in: .era, for: .now) ?? 0
-        return ordinal % count
-    }
-    static func next() {
-        UserDefaults.standard.set((index() + 1) % PresetRecords.all.count, forKey: indexKey)
-        UserDefaults.standard.set(day(), forKey: dayKey)
-    }
-    static var current: VinylAlbum {
-        let item = PresetRecords.all[index()]
-        return VinylAlbum(id: item.id, name: item.title, artist: item.artist,
-                          year: item.year, artURL: "", spotifyURL: item.link.absoluteString)
-    }
-}
-
-struct NextLocalRecordIntent: AppIntent {
-    static var title: LocalizedStringResource = "Следующий альбом"
-    func perform() async throws -> some IntentResult {
-        WidgetFallback.next()
-        WidgetCenter.shared.reloadTimelines(ofKind: "VinylMediumWidget")
-        return .result()
-    }
 }
 
 struct VinylEntry: TimelineEntry {
@@ -64,81 +22,137 @@ struct VinylProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> VinylEntry { placeholderEntry() }
 
     func snapshot(for configuration: VinylWidgetConfiguration, in context: Context) async -> VinylEntry {
-        await loadEntry(gistID: configuration.gistID, preview: context.isPreview)
+        if context.isPreview { return placeholderEntry() }
+        let payload = await loadPayload(configuration.gistID)
+        return await createEntry(for: .now, payload: payload, seed: configuration.gistID)
     }
 
     func timeline(for configuration: VinylWidgetConfiguration, in context: Context) async -> Timeline<VinylEntry> {
-        let entry = await loadEntry(gistID: configuration.gistID, preview: false)
-        // iOS may defer reload; this is a request, not an exact schedule.
-        let refresh = Date().addingTimeInterval(15 * 60)
-        return Timeline(entries: [entry], policy: .after(refresh))
+        let payload = await loadPayload(configuration.gistID)
+        let now = Date()
+        var dates: [Date] = [now]
+        var next = WidgetRotation.nextBoundary(after: now)
+        // Precompute future entries: change every 3 hours WITHOUT waking the
+        // extension or relying on a background Spotify/API request at each slot.
+        for _ in 0..<8 {
+            dates.append(next)
+            next = WidgetRotation.nextBoundary(after: next.addingTimeInterval(1))
+        }
+        // Prefetch distinct covers concurrently so a 9-entry timeline does not
+        // block on nine sequential HTTP requests. The extension caches images.
+        let albums = dates.map { selectAlbum(from: payload, at: $0, seed: configuration.gistID) }
+        var prepared: [String: Data] = [:]
+        await withTaskGroup(of: (String, Data?).self) { group in
+            var seen = Set<String>()
+            for album in albums where seen.insert(album.id).inserted {
+                group.addTask { (album.id, await artworkData(for: album)) }
+            }
+            for await (id, data) in group {
+                if let data { prepared[id] = data }
+            }
+        }
+        var entries: [VinylEntry] = []
+        for (date, album) in zip(dates, albums) {
+            let art = prepared[album.id]
+            entries.append(VinylEntry(date: date, album: album, imageData: art,
+                         background: CoverPalette.from(art.flatMap(UIImage.init(data:))),
+                         synced: payload?.library?.isEmpty == false))
+        }
+        return Timeline(entries: entries, policy: .after(next))
     }
 
     private func placeholderEntry() -> VinylEntry {
-        VinylEntry(date: .now, album: WidgetFallback.current, imageData: nil,
+        VinylEntry(date: .now, album: setupAlbum, imageData: nil,
                    background: CoverPalette.fallback, synced: false)
     }
 
-    private func loadEntry(gistID: String, preview: Bool) async -> VinylEntry {
-        if preview { return placeholderEntry() }
-        let id = gistID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isValid = id.range(of: "^[0-9a-fA-F]{10,64}$", options: .regularExpression) != nil
-        let album: VinylAlbum
-        let synced: Bool
-        if isValid {
-            let downloaded = await readGist(id)
-            if let downloaded {
-                album = downloaded
-                cacheAlbum(downloaded, gistID: id)
-                synced = true
-            } else if let cached = cachedAlbum(gistID: id) {
-                album = cached
-                synced = true
-            } else {
-                album = WidgetFallback.current
-                synced = false
-            }
-        } else {
-            album = WidgetFallback.current
-            synced = false
-        }
-        let artwork = await artworkData(for: album)
-        return VinylEntry(date: .now, album: album, imageData: artwork,
-                          background: CoverPalette.from(artwork.flatMap(UIImage.init(data:))), synced: synced)
+    private var setupAlbum: VinylAlbum {
+        VinylAlbum(id: "setup", name: "Открой VINYL", artist: "Настрой библиотеку виджета",
+                   year: "", artURL: "", spotifyURL: "")
     }
 
-    private func readGist(_ id: String) async -> VinylAlbum? {
-        guard let url = URL(string: "https://api.github.com/gists/\(id)") else { return nil }
+    private func selectAlbum(from payload: WidgetPayload?, at date: Date, seed: String) -> VinylAlbum {
+        guard let payload else { return setupAlbum }
+        guard let library = payload.library, !library.isEmpty else {
+            // Old Gist v1: keep its actual record, NEVER use the 4 demo albums.
+            return payload.album
+        }
+        if let until = payload.manualUntil, date < until {
+            return payload.album
+        }
+        let ids = library.map(\.id)
+        guard let index = WidgetRotation.index(albumIDs: ids, at: date, seed: seed) else {
+            return payload.album
+        }
+        let candidate = library[index]
+        // A manually selected album must rotate away when its three-hour
+        // window expires (unless there's only one album available).
+        if let until = payload.manualUntil, date >= until,
+           date < WidgetRotation.nextBoundary(after: until),
+           candidate.id == payload.album.id, library.count > 1 {
+            return library[(index + 1) % library.count]
+        }
+        return candidate
+    }
+
+    private func loadPayload(_ gistID: String) async -> WidgetPayload? {
+        let id = gistID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard id.range(of: "^[0-9a-fA-F]{10,64}$", options: .regularExpression) != nil else { return nil }
+        let path = cachedPayloadURL(for: id)
+        guard let url = URL(string: "https://api.github.com/gists/\(id)") else { return cached(at: path) }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 12
+        request.timeoutInterval = 15
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("VINYL-iOS-widget", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let files = json["files"] as? [String: Any],
-              let file = files["vinyl-widget.json"] as? [String: Any],
-              let content = file["content"] as? String,
-              let body = content.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(WidgetPayload.self, from: body),
-              payload.version == 1 else { return nil }
-        return payload.album
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if (response as? HTTPURLResponse)?.statusCode == 404 {
+                // Gist was revoked. Don't keep an old collection alive from cache.
+                try? FileManager.default.removeItem(at: path)
+                return nil
+            }
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let files = json["files"] as? [String: Any],
+                  let file = files["vinyl-widget.json"] as? [String: Any] else {
+                return cached(at: path)
+            }
+            let body: Data?
+            if (file["truncated"] as? Bool) == true {
+                // GitHub JSON endpoint truncates file content above ~1 MB.
+                if let string = file["raw_url"] as? String,
+                   let fullURL = URL(string: string), fullURL.scheme == "https",
+                   fullURL.host?.hasSuffix("githubusercontent.com") == true,
+                   let (raw, reply) = try? await URLSession.shared.data(from: fullURL),
+                   (reply as? HTTPURLResponse)?.statusCode == 200 { body = raw }
+                else { body = nil }
+            } else {
+                body = (file["content"] as? String)?.data(using: .utf8)
+            }
+            if let body, body.count <= 8_000_000,
+               let payload = try? JSONDecoder().decode(WidgetPayload.self, from: body),
+               (payload.version == 1 || payload.version == 2) {
+                try? body.write(to: path, options: .atomic)
+                return payload
+            }
+        } catch { /* Offline: use the last successfully downloaded collection. */ }
+        return cached(at: path)
     }
 
-    private func cacheAlbum(_ album: VinylAlbum, gistID: String) {
-        guard let data = try? JSONEncoder().encode(album) else { return }
-        UserDefaults.standard.set(data, forKey: "vinyl.gist.cached.\(gistID)")
+    private func cachedPayloadURL(for id: String) -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("vinyl_gist_\(id).json")
     }
 
-    private func cachedAlbum(gistID: String) -> VinylAlbum? {
-        guard let data = UserDefaults.standard.data(forKey: "vinyl.gist.cached.\(gistID)") else { return nil }
-        return try? JSONDecoder().decode(VinylAlbum.self, from: data)
+    private func cached(at path: URL) -> WidgetPayload? {
+        guard let data = try? Data(contentsOf: path), data.count <= 8_000_000 else { return nil }
+        return try? JSONDecoder().decode(WidgetPayload.self, from: data)
     }
 
     private func artworkData(for album: VinylAlbum) async -> Data? {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        let safeID = album.id.filter { $0.isASCII && $0.isLetter || $0.isNumber }
+        let safeID = album.id.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
         let file = directory.appendingPathComponent("vinyl_\(safeID).jpg")
         if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
            let date = attributes[.modificationDate] as? Date,
@@ -155,7 +169,8 @@ struct VinylProvider: AppIntentTimelineProvider {
                let embed = try? JSONDecoder().decode(Embed.self, from: data),
                let str = embed.thumbnail_url { url = URL(string: str) }
         }
-        guard let url, let (data, response) = try? await URLSession.shared.data(from: url),
+        guard let url, url.scheme == "https",
+              let (data, response) = try? await URLSession.shared.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200,
               UIImage(data: data) != nil else { return try? Data(contentsOf: file) }
         try? data.write(to: file, options: .atomic)
@@ -163,8 +178,6 @@ struct VinylProvider: AppIntentTimelineProvider {
     }
 }
 
-/// Widget links launch the containing app. Use an explicit VINYL callback
-/// instead of passing an external Spotify URL to WidgetKit and losing it.
 private enum SpotifyWidgetAction {
     static func link(for album: VinylAlbum) -> URL? {
         guard let spotify = album.link,
@@ -238,24 +251,12 @@ struct VinylWidgetView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    if entry.synced {
-                        // Launches the containing app, which publishes the next album.
-                        // This is essential because free signing has no App Groups.
-                        Link(destination: URL(string: "vinyl-of-day://shuffle-widget")!) {
-                            Image(systemName: "shuffle")
-                                .font(.system(size: 15, weight: .bold))
-                                .frame(width: 25, height: 28)
-                        }
-                        .accessibilityLabel("Следующий альбом через VINYL")
-                    } else {
-                        Button(intent: NextLocalRecordIntent()) {
-                            Image(systemName: "shuffle")
-                                .font(.system(size: 15, weight: .bold))
-                                .frame(width: 25, height: 28)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Следующий альбом")
+                    Link(destination: URL(string: "vinyl-of-day://shuffle-widget")!) {
+                        Image(systemName: "shuffle")
+                            .font(.system(size: 15, weight: .bold))
+                            .frame(width: 25, height: 28)
                     }
+                    .accessibilityLabel("Следующий альбом через VINYL")
                 }
             }
             .foregroundStyle(.white)
@@ -280,7 +281,7 @@ struct VinylMediumWidget: Widget {
             VinylWidgetView(entry: entry)
         }
         .configurationDisplayName("VINYL OF THE DAY")
-        .description("Выбранный альбом из приложения VINYL — GitHub Gist ID в настройках виджета")
+        .description("Случайный альбом из коллекции каждые 3 часа — укажи Gist ID в настройках")
         .supportedFamilies([.systemMedium])
     }
 }
