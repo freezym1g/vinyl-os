@@ -8,8 +8,8 @@ settings:
     SWIFT_VERSION: '5.0'
     TARGETED_DEVICE_FAMILY: '1'
     CODE_SIGN_STYLE: Automatic
-    CURRENT_PROJECT_VERSION: '12'
-    MARKETING_VERSION: '1.5.2'
+    CURRENT_PROJECT_VERSION: '13'
+    MARKETING_VERSION: '1.5.3'
 targets:
   VinylOfTheDay:
     type: application
